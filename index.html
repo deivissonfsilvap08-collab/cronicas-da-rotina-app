@@ -136,6 +136,7 @@ nav#main-nav.floating button{ padding:8px 14px; font-size:.82em; flex-shrink:0; 
   border:1px solid #3a2f5c;
   border-radius:8px;
   background:#0b0918;
+  flex-shrink:0;
 }
 
 #m-secondary-cats label{
@@ -328,6 +329,7 @@ color:#0b0918; font-size:.62em; font-weight:bold; padding:2px 6px; border-radius
   .modal-bg{ position:fixed; inset:0; background:rgba(0,0,0,.6); display:none; align-items:safe center; justify-content:center; z-index:999; overflow-y:auto; padding:20px; }
   .modal-bg.show{ display:flex; }
   .modal{ background:var(--panel); border:1px solid var(--gold-dim); border-radius:12px; padding:20px; width:90%; max-width:460px; max-height:88vh; overflow-y:auto; display:flex; flex-direction:column; }
+  .modal > *{ flex-shrink:0; }
   .modal label{ display:block; margin-top:10px; font-size:.85em; color:var(--muted); }
   .modal input, .modal select, .modal textarea{ width:100%; margin-top:4px; padding:8px; border-radius:6px; }
   .modal .mactions{ display:flex; justify-content:flex-end; gap:8px; margin-top:16px; padding-top:12px; position:sticky; bottom:-20px; background:var(--panel); margin-bottom:-20px; padding-bottom:20px; border-top:1px solid rgba(58,47,92,.5); }
@@ -353,6 +355,10 @@ color:#0b0918; font-size:.62em; font-weight:bold; padding:2px 6px; border-radius
   .project-header{ flex-direction:column !important; align-items:stretch !important; }
   .project-header .btn-row{ width:100%; }
   .project-header h2{ font-size:1.05em !important; }
+  /* Descrição da missão e categorias secundárias ficavam minúsculas no mobile (a altura
+     máxima era pensada pra tela de PC) — aqui ganham mais espaço de verdade. */
+  #m-desc, #qb-desc-hint{ min-height:70px; }
+  #m-secondary-cats, #qb-secondary-cats{ max-height:190px; }
 }
   small.hint{ color:var(--muted); display:block; margin-top:8px; }
   .btn-row{ display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
@@ -2598,6 +2604,15 @@ function mergeMaxNumbers(localC, remoteC){
   return out;
 }
 
+// Converte um atributo {level, xp, xpToNext} pro total de XP bruto já acumulado nele —
+// necessário pra poder comparar "qual dos dois lados tem mais progresso" de verdade.
+function attrToRawXP(attr){
+  if(!attr || typeof attr !== 'object') return 0;
+  let total = 0;
+  for(let lvl=1; lvl<(attr.level||1); lvl++) total += attrXpForLevel(lvl);
+  return total + (attr.xp||0);
+}
+
 function mergePlayer(localP, remoteP){
   const base = defaultState().player;
   const a = Object.assign({}, base, localP, {attrs:Object.assign({}, base.attrs, (localP||{}).attrs)});
@@ -2606,8 +2621,14 @@ function mergePlayer(localP, remoteP){
   // misturar "nível de um aparelho com XP do outro" sem os números ficarem incoerentes.
   const winner = (a.level > b.level || (a.level===b.level && a.xp >= b.xp)) ? a : b;
   const attrs = {};
+  // BUG CORRIGIDO: os atributos são objetos {level,xp,xpToNext}, não números — um
+  // Math.max direto neles virava NaN (Math.max de dois objetos), e o NaN era
+  // "silenciosamente" resetado pra zero em outro lugar do código, apagando o progresso.
+  // Agora convertemos cada lado pro total de XP bruto antes de comparar.
   new Set([...Object.keys(a.attrs||{}), ...Object.keys(b.attrs||{})]).forEach(k=>{
-    attrs[k] = Math.max((a.attrs||{})[k]||0, (b.attrs||{})[k]||0);
+    const rawA = attrToRawXP((a.attrs||{})[k]);
+    const rawB = attrToRawXP((b.attrs||{})[k]);
+    attrs[k] = attrFromRawXP(Math.max(rawA, rawB));
   });
   return { level:winner.level, xp:winner.xp, xpToNext:winner.xpToNext, attrs };
 }
