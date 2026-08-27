@@ -441,7 +441,7 @@ color:#0b0918; font-size:.62em; font-weight:bold; padding:2px 6px; border-radius
 <body>
 
 <div id="storage-banner" class="storage-banner" style="display:none;">
-  ⚠️ Seu navegador está bloqueando o salvamento local. Rode um servidor local (ex: <code>python -m http.server</code>) e acesse via <code>http://localhost</code>, ou use a extensão "Live Server" do VS Code.
+  ⚠️ Seu navegador está bloqueando o armazenamento local — <b>nada está sendo salvo de verdade</b>, tudo vai se perder ao fechar ou recarregar a aba. No Opera GX, isso costuma vir de uma configuração de privacidade: abra <code>opera://settings/content/siteData</code> e confira se "Permitir que os sites salvem dados no dispositivo" está ativado (ou adicione este site como exceção). Se estiver abrindo o arquivo direto (endereço começando com <code>file://</code>), rode um servidor local (ex: <code>python -m http.server</code>) e acesse via <code>http://localhost</code>. Exporte um backup (.json) agora, antes de continuar usando, pra não perder nada.
 </div>
 
 <div id="cloud-login-overlay" style="display:none; position:fixed; inset:0; background:rgba(6,4,14,.85); z-index:10002; align-items:center; justify-content:center; backdrop-filter:blur(4px);">
@@ -1323,17 +1323,23 @@ prazo: 25/08/2026</div>
    armazenamento em memória (funciona durante a sessão; não persiste entre visitas até o
    bloqueio ser removido nas configurações do navegador) — sem nunca travar a página. */
 const _lsMemoryFallback = {};
+// Fica "true" assim que QUALQUER chamada precisar cair no fallback de memória — sinal de
+// que o navegador está bloqueando o localStorage de verdade. Usado por persistLocalOnly()
+// pra NUNCA fingir que salvou quando na real só ficou em RAM (ver comentário mais abaixo:
+// isso é o que causava a perda silenciosa do save — o indicador dizia "salvo" mesmo sem
+// nada ter ido pro disco, e tudo sumia ao fechar ou recarregar a aba).
+let usingMemoryFallback = false;
 function safeLSGet(key){
   try{ return window.localStorage.getItem(key); }
-  catch(e){ return Object.prototype.hasOwnProperty.call(_lsMemoryFallback, key) ? _lsMemoryFallback[key] : null; }
+  catch(e){ usingMemoryFallback = true; return Object.prototype.hasOwnProperty.call(_lsMemoryFallback, key) ? _lsMemoryFallback[key] : null; }
 }
 function safeLSSet(key, value){
-  try{ window.localStorage.setItem(key, value); }
-  catch(e){ _lsMemoryFallback[key] = String(value); }
+  try{ window.localStorage.setItem(key, value); return true; }
+  catch(e){ usingMemoryFallback = true; _lsMemoryFallback[key] = String(value); return false; }
 }
 function safeLSRemove(key){
   try{ window.localStorage.removeItem(key); }
-  catch(e){ delete _lsMemoryFallback[key]; }
+  catch(e){ usingMemoryFallback = true; delete _lsMemoryFallback[key]; }
 }
 
 /* ============ DADOS BASE ============ */
@@ -2421,10 +2427,18 @@ function persistLocalOnly(){
     // deixando o app lento (JSON.stringify + escrita no localStorage de ~2.6MB por ação).
     // Eles têm sua própria chave/rotina de salvamento: ver persistSound()/persistAllSounds().
     const { sounds, ...stateToSave } = state;
-    safeLSSet(STORAGE_KEY, JSON.stringify(stateToSave));
-    storageOK = true;
-    document.getElementById('storage-banner').style.display='none';
-    document.getElementById('save-indicator').textContent = 'salvo às ' + new Date().toLocaleTimeString('pt-BR');
+    // CORRIGIDO — antes, safeLSSet nunca deixava o erro "escapar" (ela mesma cai num
+    // fallback em memória e engole a exceção), então este try/catch nunca disparava e o
+    // indicador sempre dizia "salvo", MESMO quando o navegador estava bloqueando o
+    // armazenamento de verdade e tudo só existia em RAM — some ao fechar/recarregar a
+    // aba. Agora checamos o retorno real de safeLSSet (e a flag usingMemoryFallback) pra
+    // só dizer "salvo" quando realmente foi salvo.
+    const savedForReal = safeLSSet(STORAGE_KEY, JSON.stringify(stateToSave));
+    storageOK = savedForReal;
+    document.getElementById('storage-banner').style.display = savedForReal ? 'none' : 'block';
+    document.getElementById('save-indicator').textContent = savedForReal
+      ? ('salvo às ' + new Date().toLocaleTimeString('pt-BR'))
+      : '⚠️ NÃO salvo (só nesta aba — some ao fechar)';
   }catch(err){
     storageOK = false;
     document.getElementById('storage-banner').style.display='block';
@@ -2734,35 +2748,8 @@ function meaningfulStateSignature(s){
   }catch(err){ return String(Math.random()); }
 }
 
-// Disjuntor específico pra APLICAR estado que chega da nuvem (não só pra enviar) — cada
-// aplicação roda checkAchievements() e um render completo da tela, que são caros. Se por
-// qualquer motivo os eventos de tempo real chegarem rápido demais (rede instável, mais de
-// um aparelho sincronizando ao mesmo tempo, etc.), isso sozinho já é o suficiente pra
-// travar o navegador — mesmo sem nenhum envio de rede de verdade acontecendo.
-const CLOUD_APPLY_CIRCUIT_LIMIT = 6;
-const CLOUD_APPLY_CIRCUIT_WINDOW_MS = 10000;
-const CLOUD_APPLY_CIRCUIT_COOLDOWN_MS = 30000;
-let cloudApplyTimestamps = [];
-let cloudApplyCircuitOpenUntil = 0;
-function cloudApplyCircuitAllows(){
-  const now = Date.now();
-  if(now < cloudApplyCircuitOpenUntil) return false;
-  cloudApplyTimestamps = cloudApplyTimestamps.filter(t => now - t < CLOUD_APPLY_CIRCUIT_WINDOW_MS);
-  if(cloudApplyTimestamps.length >= CLOUD_APPLY_CIRCUIT_LIMIT){
-    cloudApplyCircuitOpenUntil = now + CLOUD_APPLY_CIRCUIT_COOLDOWN_MS;
-    console.error('Disjuntor de recebimento de sincronização acionado: eventos demais em pouco tempo. Pausando por '+(CLOUD_APPLY_CIRCUIT_COOLDOWN_MS/1000)+'s.');
-    setCloudIndicator('☁ pausado (muita atividade) — retomando em instantes');
-    if(cloudChannel){ sb.removeChannel(cloudChannel); cloudChannel = null; }
-    setTimeout(()=>{ if(sb && cloudUserId) subscribeCloudRealtime(); }, CLOUD_APPLY_CIRCUIT_COOLDOWN_MS + 500);
-    return false;
-  }
-  cloudApplyTimestamps.push(now);
-  return true;
-}
-
 function applyRemoteState(remoteData){
   if(!remoteData) return false;
-  if(!cloudApplyCircuitAllows()) return false;
   applyingRemote = true;
   let hadMeaningfulChange = false;
   try{
