@@ -2734,8 +2734,35 @@ function meaningfulStateSignature(s){
   }catch(err){ return String(Math.random()); }
 }
 
+// Disjuntor específico pra APLICAR estado que chega da nuvem (não só pra enviar) — cada
+// aplicação roda checkAchievements() e um render completo da tela, que são caros. Se por
+// qualquer motivo os eventos de tempo real chegarem rápido demais (rede instável, mais de
+// um aparelho sincronizando ao mesmo tempo, etc.), isso sozinho já é o suficiente pra
+// travar o navegador — mesmo sem nenhum envio de rede de verdade acontecendo.
+const CLOUD_APPLY_CIRCUIT_LIMIT = 6;
+const CLOUD_APPLY_CIRCUIT_WINDOW_MS = 10000;
+const CLOUD_APPLY_CIRCUIT_COOLDOWN_MS = 30000;
+let cloudApplyTimestamps = [];
+let cloudApplyCircuitOpenUntil = 0;
+function cloudApplyCircuitAllows(){
+  const now = Date.now();
+  if(now < cloudApplyCircuitOpenUntil) return false;
+  cloudApplyTimestamps = cloudApplyTimestamps.filter(t => now - t < CLOUD_APPLY_CIRCUIT_WINDOW_MS);
+  if(cloudApplyTimestamps.length >= CLOUD_APPLY_CIRCUIT_LIMIT){
+    cloudApplyCircuitOpenUntil = now + CLOUD_APPLY_CIRCUIT_COOLDOWN_MS;
+    console.error('Disjuntor de recebimento de sincronização acionado: eventos demais em pouco tempo. Pausando por '+(CLOUD_APPLY_CIRCUIT_COOLDOWN_MS/1000)+'s.');
+    setCloudIndicator('☁ pausado (muita atividade) — retomando em instantes');
+    if(cloudChannel){ sb.removeChannel(cloudChannel); cloudChannel = null; }
+    setTimeout(()=>{ if(sb && cloudUserId) subscribeCloudRealtime(); }, CLOUD_APPLY_CIRCUIT_COOLDOWN_MS + 500);
+    return false;
+  }
+  cloudApplyTimestamps.push(now);
+  return true;
+}
+
 function applyRemoteState(remoteData){
   if(!remoteData) return false;
+  if(!cloudApplyCircuitAllows()) return false;
   applyingRemote = true;
   let hadMeaningfulChange = false;
   try{
