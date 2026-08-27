@@ -983,9 +983,10 @@ prazo: 25/08/2026</div>
   <section class="tab" id="tab-config">
     <div class="card">
       <h2>☁ Sincronização (opcional)</h2>
-      <small class="hint">Totalmente por sua conta: o app funciona 100% neste aparelho sem nenhuma conta. Só entra em contato com a nuvem se você clicar em "Entrar / Sincronizar" abaixo — nunca aparece sozinho.</small>
+      <small class="hint">Totalmente por sua conta: o app funciona 100% neste aparelho sem nenhuma conta. Só entra em contato com a nuvem se você clicar em "Entrar / Sincronizar" abaixo — nunca aparece sozinho. Depois de conectado, ele verifica a nuvem sozinho ao reabrir o app e a cada ~25s — mas "Sincronizar agora" força isso na hora, se você não quiser esperar.</small>
       <div style="margin-top:8px;"><small class="hint" id="cloud-account-status">Não conectado.</small></div>
       <div style="margin-top:10px;">
+        <button class="btn btn-sm" id="cloud-sync-now-btn" style="display:none;">🔄 Sincronizar agora</button>
         <button class="btn btn-sm" id="cloud-logout-btn" style="display:none;">Sair da conta</button>
         <button class="btn btn-sm" id="cloud-login-again-btn" style="display:none;">Entrar / Sincronizar</button>
       </div>
@@ -2946,6 +2947,7 @@ async function afterCloudLogin(session){
   cloudUserEmail = session.user.email;
   hideCloudLoginOverlay();
   setCloudAccountStatus('Conectado como ' + cloudUserEmail + '.');
+  document.getElementById('cloud-sync-now-btn').style.display = 'inline-block';
   document.getElementById('cloud-logout-btn').style.display = 'inline-block';
   document.getElementById('cloud-login-again-btn').style.display = 'none';
   await pullCloudStateAndMerge(); // já nunca lança erro (ver comentário lá dentro)
@@ -2958,6 +2960,7 @@ function resetCloudUiToLoggedOut(){
   if(cloudChannel){ sb.removeChannel(cloudChannel); cloudChannel = null; }
   setCloudIndicator('☁ desconectado');
   setCloudAccountStatus('Não conectado — suas mudanças ficam só neste aparelho.');
+  document.getElementById('cloud-sync-now-btn').style.display = 'none';
   document.getElementById('cloud-logout-btn').style.display = 'none';
   document.getElementById('cloud-login-again-btn').style.display = 'inline-block';
 }
@@ -2974,6 +2977,16 @@ async function initCloudSync(){
   document.getElementById('cloud-login-password').addEventListener('keydown', (e)=>{ if(e.key==='Enter') doCloudLoginSubmit(); });
   document.getElementById('cloud-login-skip').addEventListener('click', hideCloudLoginOverlay);
   document.getElementById('cloud-login-again-btn').addEventListener('click', showCloudLoginOverlay);
+  document.getElementById('cloud-sync-now-btn').addEventListener('click', async ()=>{
+    const btn = document.getElementById('cloud-sync-now-btn');
+    btn.disabled = true; const original = btn.textContent; btn.textContent = 'Sincronizando...';
+    try{
+      await pullCloudStateAndMerge(); // traz o que tiver de novo de outro aparelho
+      await pushCloudStateNow(); // garante que o que só existe aqui também vai pra nuvem
+    } finally {
+      btn.disabled = false; btn.textContent = original;
+    }
+  });
   document.getElementById('cloud-logout-btn').addEventListener('click', async ()=>{
     const btn = document.getElementById('cloud-logout-btn');
     btn.disabled = true; const originalText = btn.textContent; btn.textContent = 'Saindo...';
@@ -7934,6 +7947,29 @@ setInterval(()=>{
   try{ refreshRecurringQuests(); checkDeadlineAlerts(); checkGoalsProgress(); }
   catch(err){ console.error('Erro no ciclo de atualização automática', err); }
 }, 60000);
+
+// ===== Rede de segurança pra sincronização com a nuvem =====
+// O tempo real (WebSocket) avisa o outro aparelho na hora, MAS só funciona enquanto essa
+// conexão estiver de pé — e em celular ela cai o tempo todo (app em segundo plano, tela
+// apagada, o sistema "pausando" o PWA pra economizar bateria). Foi exatamente isso que fez
+// uma missão concluída no celular demorar tanto pra aparecer no PC: só voltou a sincronizar
+// quando o app foi reaberto do zero. As duas camadas abaixo cobrem esse buraco.
+
+// 1) Toda vez que o app volta a ficar visível (troca de aba, desbloqueia o celular, reabre
+//    o PWA), puxa a versão mais recente da nuvem — não espera o tempo real se reconectar.
+document.addEventListener('visibilitychange', ()=>{
+  if(document.visibilityState === 'visible' && sb && cloudUserId){
+    pullCloudStateAndMerge().catch(err=>console.error('Falha ao verificar a nuvem ao voltar pro app', err));
+  }
+});
+
+// 2) Mesmo sem trocar de aba, confere a nuvem de tempos em tempos como reforço — cobre o
+//    caso de ficar com o app aberto e ativo num aparelho enquanto muda algo no outro.
+setInterval(()=>{
+  if(sb && cloudUserId && document.visibilityState === 'visible'){
+    pullCloudStateAndMerge().catch(err=>console.error('Falha na verificação periódica da nuvem', err));
+  }
+}, 25000);
 
 /* ============ PWA: instalar como app + service worker ============ */
 // AUTOATUALIZAÇÃO: sempre que uma versão nova do service-worker.js for publicada (ver o
