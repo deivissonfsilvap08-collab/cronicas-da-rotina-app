@@ -7712,10 +7712,23 @@ setInterval(()=>{
 }, 60000);
 
 /* ============ PWA: instalar como app + service worker ============ */
+// AUTOATUALIZAÇÃO: sempre que uma versão nova do service-worker.js for publicada (ver o
+// comentário de CACHE_NAME dentro dele), o navegador a instala em segundo plano sozinho.
+// Antes, isso só tomava efeito na aba/próxima visita, e a pessoa podia ficar presa vendo a
+// versão antiga sem entender por quê (foi exatamente o que causou a trava no Opera GX e no
+// celular). Agora: assim que a versão nova assume o controle, a página recarrega sozinha,
+// UMA vez, automaticamente — sem exigir que ninguém saiba o que é "cache" ou "Service Worker".
 safeInit(()=>{
   if('serviceWorker' in navigator && location.protocol !== 'file:'){
     navigator.serviceWorker.register('./service-worker.js')
       .catch(err=>console.error('Falha ao registrar o service worker', err));
+
+    let refreshedAlready = false;
+    navigator.serviceWorker.addEventListener('controllerchange', ()=>{
+      if(refreshedAlready) return; // nunca recarrega mais de uma vez por sessão (evita loop)
+      refreshedAlready = true;
+      window.location.reload();
+    });
   } else if(location.protocol === 'file:'){
     const hint = document.getElementById('pwa-install-hint');
     if(hint) hint.textContent = 'Pra instalar, o app precisa estar rodando de um servidor (http/https), não direto do arquivo.';
