@@ -973,8 +973,9 @@ prazo: 25/08/2026</div>
 
   <section class="tab" id="tab-config">
     <div class="card">
-      <h2>☁ Sincronização</h2>
-      <small class="hint" id="cloud-account-status">Não conectado.</small>
+      <h2>☁ Sincronização (opcional)</h2>
+      <small class="hint">Totalmente por sua conta: o app funciona 100% neste aparelho sem nenhuma conta. Só entra em contato com a nuvem se você clicar em "Entrar / Sincronizar" abaixo — nunca aparece sozinho.</small>
+      <div style="margin-top:8px;"><small class="hint" id="cloud-account-status">Não conectado.</small></div>
       <div style="margin-top:10px;">
         <button class="btn btn-sm" id="cloud-logout-btn" style="display:none;">Sair da conta</button>
         <button class="btn btn-sm" id="cloud-login-again-btn" style="display:none;">Entrar / Sincronizar</button>
@@ -2470,7 +2471,6 @@ function scheduleSave(){
 
 const SUPABASE_URL = 'https://jdfovnjpeeoltybhytyo.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_6KRDxg4lRmjckoAul9BDPQ__pjXq4Qw';
-const CLOUD_SKIP_KEY = 'cloud_sync_skipped';
 const CLOUD_PUSH_DEBOUNCE_MS = 1200;
 
 let sb = null;
@@ -2873,7 +2873,6 @@ async function afterCloudLogin(session){
   cloudUserId = session.user.id;
   cloudUserEmail = session.user.email;
   hideCloudLoginOverlay();
-  safeLSRemove(CLOUD_SKIP_KEY);
   setCloudAccountStatus('Conectado como ' + cloudUserEmail + '.');
   document.getElementById('cloud-logout-btn').style.display = 'inline-block';
   document.getElementById('cloud-login-again-btn').style.display = 'none';
@@ -2901,23 +2900,18 @@ async function initCloudSync(){
 
   document.getElementById('cloud-login-submit').addEventListener('click', doCloudLoginSubmit);
   document.getElementById('cloud-login-password').addEventListener('keydown', (e)=>{ if(e.key==='Enter') doCloudLoginSubmit(); });
-  document.getElementById('cloud-login-skip').addEventListener('click', ()=>{
-    // Se o navegador estiver bloqueando localStorage, esse setItem lançava um erro e
-    // travava o clique ANTES de fechar a tela — a pessoa ficava presa atrás do fundo
-    // escuro sem conseguir sair. Agora a tela sempre fecha, com ou sem storage.
-    try{ safeLSSet(CLOUD_SKIP_KEY, '1'); }catch(e){ console.error('Não foi possível lembrar de pular o login (localStorage bloqueado)', e); }
-    hideCloudLoginOverlay();
-  });
+  document.getElementById('cloud-login-skip').addEventListener('click', hideCloudLoginOverlay);
   document.getElementById('cloud-login-again-btn').addEventListener('click', showCloudLoginOverlay);
   document.getElementById('cloud-logout-btn').addEventListener('click', async ()=>{
-    await sb.auth.signOut();
+    try{ await sb.auth.signOut(); }catch(e){ console.error('Falha ao sair da conta', e); }
     resetCloudUiToLoggedOut();
   });
 
-  // O SDK do Supabase também usa localStorage por baixo dos panos (pra lembrar sua sessão
-  // entre visitas) — se o navegador estiver bloqueando storage, essa chamada pode lançar
-  // um erro e travar a sincronização inteira pela metade. Com o try/catch, na pior das
-  // hipóteses você só precisa logar de novo a cada visita — mas o app continua funcionando.
+  // SIMPLIFICADO — a sincronização com a nuvem NUNCA MAIS aparece por conta própria: nada
+  // de tela cobrindo o app sem avisar, nada de "login obrigatório" na cara da pessoa assim
+  // que o app abre. A única coisa automática é continuar uma sessão que JÁ existia (sem
+  // mostrar nada na tela, só em segundo plano) — pra realmente entrar/sincronizar, a pessoa
+  // clica em "Entrar / Sincronizar" nas Configurações, por vontade própria, quando quiser.
   let session = null;
   try{
     const result = await sb.auth.getSession();
@@ -2929,11 +2923,6 @@ async function initCloudSync(){
     await afterCloudLogin(session);
   } else {
     resetCloudUiToLoggedOut();
-    // Mesma proteção aqui: ler o localStorage também pode lançar erro se estiver
-    // bloqueado — sem o try/catch, isso impedia até de SABER se devia mostrar a tela.
-    let alreadySkipped = false;
-    try{ alreadySkipped = !!safeLSGet(CLOUD_SKIP_KEY); }catch(e){}
-    if(!alreadySkipped) showCloudLoginOverlay();
   }
 }
 
