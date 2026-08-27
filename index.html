@@ -2739,6 +2739,7 @@ function applyRemoteState(remoteData){
 
 async function pushCloudStateNow(){
   if(!sb || !cloudUserId) return;
+  if(!cloudPushCircuitAllows()) return;
   try{
     setCloudIndicator('☁ enviando...');
     const { sounds, ...stateToSave } = state;
@@ -2753,6 +2754,29 @@ async function pushCloudStateNow(){
     console.error('Falha ao enviar estado pra nuvem', err);
     setCloudIndicator('☁ sem conexão');
   }
+}
+
+// Disjuntor de segurança: não importa QUAL bug ou cenário de rede cause um vaivém de
+// sincronização entre os aparelhos, isso nunca pode virar um loop sem fim que consome
+// memória/rede até travar o navegador. Se acontecerem muitos envios em pouco tempo,
+// paramos de propagar automaticamente por um tempo e avisamos no indicador.
+const CLOUD_PUSH_CIRCUIT_LIMIT = 8;
+const CLOUD_PUSH_CIRCUIT_WINDOW_MS = 10000;
+const CLOUD_PUSH_CIRCUIT_COOLDOWN_MS = 30000;
+let cloudPushTimestamps = [];
+let cloudCircuitOpenUntil = 0;
+function cloudPushCircuitAllows(){
+  const now = Date.now();
+  if(now < cloudCircuitOpenUntil) return false;
+  cloudPushTimestamps = cloudPushTimestamps.filter(t => now - t < CLOUD_PUSH_CIRCUIT_WINDOW_MS);
+  if(cloudPushTimestamps.length >= CLOUD_PUSH_CIRCUIT_LIMIT){
+    cloudCircuitOpenUntil = now + CLOUD_PUSH_CIRCUIT_COOLDOWN_MS;
+    console.error('Disjuntor de sincronização acionado: muitos envios em pouco tempo. Pausando por '+(CLOUD_PUSH_CIRCUIT_COOLDOWN_MS/1000)+'s.');
+    setCloudIndicator('☁ pausado (muita atividade) — retomando em instantes');
+    return false;
+  }
+  cloudPushTimestamps.push(now);
+  return true;
 }
 
 function scheduleCloudPush(){
@@ -2782,9 +2806,10 @@ async function pullCloudStateAndMerge(){
   if(changed && cloudUpdatedAt > localUpdatedAt){
     showNotif({icon:'☁', title:'Sincronizado', sub:'Trouxemos e mesclamos as mudanças do outro aparelho.'});
   }
-  // Reenvia o resultado mesclado — assim o lado que estava "atrasado" (aqui ou na nuvem)
-  // passa a ter a versão completa, e não fica só com a metade dele.
-  await pushCloudStateNow();
+  // Só reenvia se a mesclagem realmente mudou algo aqui — reenviar sempre, mesmo sem
+  // mudança nenhuma, alimentava idas e vindas desnecessárias entre os aparelhos.
+  if(changed) await pushCloudStateNow();
+  else setCloudIndicator('☁ sincronizado');
 }
 
 function subscribeCloudRealtime(){
