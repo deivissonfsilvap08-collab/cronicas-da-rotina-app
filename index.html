@@ -1315,39 +1315,26 @@ prazo: 25/08/2026</div>
 <script>
 /* ============ BLINDAGEM DE ARMAZENAMENTO ============
    Alguns navegadores (ex.: Opera GX com certas configurações de privacidade) BLOQUEIAM o
-   localStorage completamente — toda chamada (leitura OU escrita) lança um erro. Como o
-   código inteiro usa localStorage.getItem/setItem direto em dezenas de lugares (trocar de
-   aba, abrir a tela de login da nuvem, etc.), um bloqueio assim travava a página inteira
-   assim que qualquer uma dessas chamadas não-blindadas era executada.
-   Em vez de caçar e blindar cada chamada uma por uma, substituímos o localStorage por um
-   "substituto" que nunca lança erro: se o de verdade funcionar, ele é só um repasse
-   transparente; se estiver bloqueado, cai pra um armazenamento só-em-memória (funciona
-   normalmente durante a sessão, mas não persiste entre visitas até o bloqueio ser
-   removido) — o app continua 100% usável de qualquer jeito, só sem salvar localmente. */
-(function ensureSafeLocalStorage(){
-  try{
-    const testKey = '__storage_probe__';
-    window.localStorage.setItem(testKey, '1');
-    window.localStorage.removeItem(testKey);
-    return; // localStorage funciona normalmente — nada a fazer
-  }catch(e){
-    console.error('localStorage bloqueado pelo navegador — usando um substituto só-nesta-sessão. Dados não vão persistir entre visitas até isso ser liberado nas configurações do navegador.', e);
-  }
-  const memoryStore = {};
-  const fakeStorage = {
-    getItem(key){ return Object.prototype.hasOwnProperty.call(memoryStore, key) ? memoryStore[key] : null; },
-    setItem(key, value){ memoryStore[key] = String(value); },
-    removeItem(key){ delete memoryStore[key]; },
-    clear(){ Object.keys(memoryStore).forEach(k=>delete memoryStore[k]); },
-    key(i){ return Object.keys(memoryStore)[i] || null; },
-    get length(){ return Object.keys(memoryStore).length; }
-  };
-  try{
-    Object.defineProperty(window, 'localStorage', { value: fakeStorage, configurable: true });
-  }catch(e2){
-    console.error('Não foi possível nem substituir o localStorage — algumas telas podem não funcionar.', e2);
-  }
-})();
+   localStorage completamente — toda chamada lança um erro. Uma tentativa anterior de
+   substituir window.localStorage inteiro por um objeto seguro não funcionou em todos os
+   casos: alguns navegadores bloqueiam de um jeito que nem deixa a propriedade ser
+   redefinida. Por isso, agora cada chamada ao longo do código passa por uma destas três
+   funções, que tentam o localStorage de verdade e, se ele lançar erro, caem sozinhas num
+   armazenamento em memória (funciona durante a sessão; não persiste entre visitas até o
+   bloqueio ser removido nas configurações do navegador) — sem nunca travar a página. */
+const _lsMemoryFallback = {};
+function safeLSGet(key){
+  try{ return window.localStorage.getItem(key); }
+  catch(e){ return Object.prototype.hasOwnProperty.call(_lsMemoryFallback, key) ? _lsMemoryFallback[key] : null; }
+}
+function safeLSSet(key, value){
+  try{ window.localStorage.setItem(key, value); }
+  catch(e){ _lsMemoryFallback[key] = String(value); }
+}
+function safeLSRemove(key){
+  try{ window.localStorage.removeItem(key); }
+  catch(e){ delete _lsMemoryFallback[key]; }
+}
 
 /* ============ DADOS BASE ============ */
 const CATEGORIES = {
@@ -1763,10 +1750,10 @@ const SOUNDS_STORAGE_KEY = 'ahsd_rpg_sounds_v1';
 // já bate, sem correção nenhuma) ou por OUTRO aparelho (aí pode ter um pequeno desvio entre
 // os dois relógios de sistema — ver clockSkewMs mais abaixo).
 function getDeviceId(){
-  let id = localStorage.getItem('ahsd_device_id');
+  let id = safeLSGet('ahsd_device_id');
   if(!id){
     id = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('dev_'+Date.now()+'_'+Math.random().toString(36).slice(2));
-    localStorage.setItem('ahsd_device_id', id);
+    safeLSSet('ahsd_device_id', id);
   }
   return id;
 }
@@ -2129,7 +2116,7 @@ function buildDefaultAchievements(){
 let storageOK = true;
 function loadState(){
   try{
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = safeLSGet(STORAGE_KEY);
     if(!raw){
       const s = Object.assign(defaultState(), { achievementDefs: buildDefaultAchievements() });
       s.sounds = loadSoundsFromStorage(null);
@@ -2205,7 +2192,7 @@ function loadSoundsFromStorage(legacyEmbeddedSounds){
   let foundAnyPerKey = false;
   SOUND_KEYS.forEach(name=>{
     try{
-      const raw = localStorage.getItem(soundStorageKey(name));
+      const raw = safeLSGet(soundStorageKey(name));
       if(raw){ sounds[name] = raw; foundAnyPerKey = true; }
     }catch(e){ console.error('Falha ao carregar o som "'+name+'"', e); }
   });
@@ -2216,7 +2203,7 @@ function loadSoundsFromStorage(legacyEmbeddedSounds){
   // estado principal (legacyEmbeddedSounds).
   let legacySource = null;
   try{
-    const rawCombined = localStorage.getItem(SOUNDS_STORAGE_KEY);
+    const rawCombined = safeLSGet(SOUNDS_STORAGE_KEY);
     if(rawCombined) legacySource = JSON.parse(rawCombined);
   }catch(e){ console.error('Falha ao ler formato antigo combinado de sons', e); }
   if(!legacySource && legacyEmbeddedSounds && Object.values(legacyEmbeddedSounds).some(Boolean)){
@@ -2257,7 +2244,7 @@ async function persistSound(name){
     // Mantém uma cópia em localStorage só se ela couber tranquilamente — é apenas um
     // atalho de carregamento inicial rápido; se estourar o limite aqui, sem problema,
     // o IndexedDB (que acabou de gravar com sucesso acima) já é a fonte de verdade.
-    try{ localStorage.setItem(soundStorageKey(name), state.sounds[name] || ''); }catch(e){}
+    try{ safeLSSet(soundStorageKey(name), state.sounds[name] || ''); }catch(e){}
     return true;
   }catch(err){
     console.error('Falha ao salvar o som "'+name+'" no IndexedDB', err);
@@ -2434,7 +2421,7 @@ function persistLocalOnly(){
     // deixando o app lento (JSON.stringify + escrita no localStorage de ~2.6MB por ação).
     // Eles têm sua própria chave/rotina de salvamento: ver persistSound()/persistAllSounds().
     const { sounds, ...stateToSave } = state;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(stateToSave));
+    safeLSSet(STORAGE_KEY, JSON.stringify(stateToSave));
     storageOK = true;
     document.getElementById('storage-banner').style.display='none';
     document.getElementById('save-indicator').textContent = 'salvo às ' + new Date().toLocaleTimeString('pt-BR');
@@ -2872,7 +2859,7 @@ async function afterCloudLogin(session){
   cloudUserId = session.user.id;
   cloudUserEmail = session.user.email;
   hideCloudLoginOverlay();
-  localStorage.removeItem(CLOUD_SKIP_KEY);
+  safeLSRemove(CLOUD_SKIP_KEY);
   setCloudAccountStatus('Conectado como ' + cloudUserEmail + '.');
   document.getElementById('cloud-logout-btn').style.display = 'inline-block';
   document.getElementById('cloud-login-again-btn').style.display = 'none';
@@ -2904,7 +2891,7 @@ async function initCloudSync(){
     // Se o navegador estiver bloqueando localStorage, esse setItem lançava um erro e
     // travava o clique ANTES de fechar a tela — a pessoa ficava presa atrás do fundo
     // escuro sem conseguir sair. Agora a tela sempre fecha, com ou sem storage.
-    try{ localStorage.setItem(CLOUD_SKIP_KEY, '1'); }catch(e){ console.error('Não foi possível lembrar de pular o login (localStorage bloqueado)', e); }
+    try{ safeLSSet(CLOUD_SKIP_KEY, '1'); }catch(e){ console.error('Não foi possível lembrar de pular o login (localStorage bloqueado)', e); }
     hideCloudLoginOverlay();
   });
   document.getElementById('cloud-login-again-btn').addEventListener('click', showCloudLoginOverlay);
@@ -2931,7 +2918,7 @@ async function initCloudSync(){
     // Mesma proteção aqui: ler o localStorage também pode lançar erro se estiver
     // bloqueado — sem o try/catch, isso impedia até de SABER se devia mostrar a tela.
     let alreadySkipped = false;
-    try{ alreadySkipped = !!localStorage.getItem(CLOUD_SKIP_KEY); }catch(e){}
+    try{ alreadySkipped = !!safeLSGet(CLOUD_SKIP_KEY); }catch(e){}
     if(!alreadySkipped) showCloudLoginOverlay();
   }
 }
@@ -2997,7 +2984,7 @@ function activateTab(tabName){
     ensureChartJs().then(renderVisaoGeral).catch(err=>console.error('Não foi possível carregar os gráficos da Visão Geral', err));
   }
   if(tabName==='conquistas') renderAchievements();
-  localStorage.setItem('activeTab', tabName);
+  safeLSSet('activeTab', tabName);
 }
 document.querySelectorAll('nav button').forEach(btn=>{
   btn.addEventListener('click', ()=>activateTab(btn.dataset.tab));
@@ -3726,7 +3713,7 @@ function initSmoothDragDrop(container, { itemSelector, getId, onReorder }){
 }
 
 function sortAchievements(list){
-  const mode = localStorage.getItem('achSortMode') || 'new-first';
+  const mode = safeLSGet('achSortMode') || 'new-first';
   const arr = [...list];
   if(mode === 'new-first'){
     arr.sort((a,b)=> (b.createdAt||0) - (a.createdAt||0));
@@ -3776,7 +3763,7 @@ function renderAchievements(){
   _achTierCache = null; // força recálculo da tabela de tiers pra este render (ver getAchievementTier)
 
   const sortSelectEl = document.getElementById('ach-sort-select');
-  if (sortSelectEl) sortSelectEl.value = localStorage.getItem('achSortMode') || 'new-first';
+  if (sortSelectEl) sortSelectEl.value = safeLSGet('achSortMode') || 'new-first';
 
   const grid = document.getElementById('ach-grid');
   grid.innerHTML = '';
@@ -3874,7 +3861,7 @@ function persistAchOrder(orderedIds){
     const def = state.achievementDefs.find(d=>d.id===id);
     if(def) def.sortIndex = idx;
   });
-  localStorage.setItem('achSortMode','custom');
+  safeLSSet('achSortMode','custom');
   const sortSelectEl = document.getElementById('ach-sort-select');
   if(sortSelectEl) sortSelectEl.value = 'custom';
   persistNow();
@@ -3933,7 +3920,7 @@ document.getElementById('btn-ach-from-quests').addEventListener('click', ()=>{
 });
 
 document.getElementById('ach-sort-select').addEventListener('change', (e)=>{
-  localStorage.setItem('achSortMode', e.target.value);
+  safeLSSet('achSortMode', e.target.value);
   renderAchievements();
 });
 
@@ -4301,11 +4288,11 @@ function playSound(key){
   if(key === 'deadline_alert') playDefaultBeep(880, 0.18);
 }
 
-let currentFilter = localStorage.getItem('questActiveFilter') || 'all';
+let currentFilter = safeLSGet('questActiveFilter') || 'all';
 document.querySelectorAll('#quest-filters button').forEach(b=>{
   b.addEventListener('click', ()=>{
     currentFilter = b.dataset.f;
-    localStorage.setItem('questActiveFilter', currentFilter);
+    safeLSSet('questActiveFilter', currentFilter);
     renderQuests();
   });
 });
@@ -4316,7 +4303,7 @@ function syncQuestFilterButtonsUI(){
 }
 
 document.getElementById('quest-sort-select').addEventListener('change', (e)=>{
-  localStorage.setItem('questSortMode', e.target.value);
+  safeLSSet('questSortMode', e.target.value);
   renderQuests();
 });
 
@@ -4327,7 +4314,7 @@ document.getElementById('quest-search').addEventListener('input', e=>{
 });
 
 function sortQuestsList(list){
-  const mode = localStorage.getItem('questSortMode') || 'new-first';
+  const mode = safeLSGet('questSortMode') || 'new-first';
   const arr = [...list];
   if(mode === 'new-first'){
     arr.sort((a,b)=> new Date(b.createdAt) - new Date(a.createdAt));
@@ -4344,7 +4331,7 @@ function persistQuestGlobalOrder(orderedIds){
     const q = state.quests.find(x=>x.id===id);
     if(q) q.globalOrder = idx;
   });
-  localStorage.setItem('questSortMode','custom');
+  safeLSSet('questSortMode','custom');
   const sortSelectEl = document.getElementById('quest-sort-select');
   if(sortSelectEl) sortSelectEl.value = 'custom';
   persistNow();
@@ -4427,7 +4414,7 @@ function renderQuests(){
   syncQuestFilterButtonsUI();
   updateQuestFilterCounts();
   const sortSelectEl = document.getElementById('quest-sort-select');
-  if(sortSelectEl) sortSelectEl.value = localStorage.getItem('questSortMode') || 'new-first';
+  if(sortSelectEl) sortSelectEl.value = safeLSGet('questSortMode') || 'new-first';
 
   const list = document.getElementById('quest-list');
   list.innerHTML = '';
@@ -4989,7 +4976,7 @@ const QB_COLLAPSE_KEY = 'qbBatchCollapsed';
 function initBatchPanelCollapseState(){
   const body = document.getElementById('qb-fields-body');
   const icon = document.getElementById('qb-toggle-icon');
-  const collapsed = localStorage.getItem(QB_COLLAPSE_KEY) !== 'false'; // padrão: fechado
+  const collapsed = safeLSGet(QB_COLLAPSE_KEY) !== 'false'; // padrão: fechado
   body.style.display = collapsed ? 'none' : 'block';
   icon.textContent = collapsed ? '▶' : '🔽';
 }
@@ -4999,17 +4986,17 @@ document.getElementById('qb-toggle-header').addEventListener('click', ()=>{
   const willShow = body.style.display === 'none';
   body.style.display = willShow ? 'block' : 'none';
   icon.textContent = willShow ? '🔽' : '▶';
-  localStorage.setItem(QB_COLLAPSE_KEY, willShow ? 'false' : 'true');
+  safeLSSet(QB_COLLAPSE_KEY, willShow ? 'false' : 'true');
 });
 
 const QUICK_FORMAT_KEY = 'quickFormatModeEnabled';
 function initQuickFormatModeState(){
   const cb = document.getElementById('quick-format-mode');
-  const saved = localStorage.getItem(QUICK_FORMAT_KEY);
+  const saved = safeLSGet(QUICK_FORMAT_KEY);
   cb.checked = saved === null ? true : saved === 'true';
 }
 document.getElementById('quick-format-mode').addEventListener('change', e=>{
-  localStorage.setItem(QUICK_FORMAT_KEY, e.target.checked ? 'true' : 'false');
+  safeLSSet(QUICK_FORMAT_KEY, e.target.checked ? 'true' : 'false');
 });
 
 function renderDraftPreview(){
@@ -7708,7 +7695,7 @@ safeInit(renderBatchCategorySelect, 'select de categoria em lote');
 safeInit(initBatchPanelCollapseState, 'painel de configurações em lote');
 safeInit(initQuickFormatModeState, 'modo de texto formatado');
 safeInit(()=>{
-  const savedTab = localStorage.getItem('activeTab');
+  const savedTab = safeLSGet('activeTab');
   if(savedTab && document.getElementById('tab-'+savedTab)) activateTab(savedTab);
 }, 'restaurar aba ativa');
 safeInit(checkDeadlineAlerts, 'alertas de prazo');
