@@ -2934,7 +2934,13 @@ async function initCloudSync(){
   document.getElementById('cloud-login-skip').addEventListener('click', hideCloudLoginOverlay);
   document.getElementById('cloud-login-again-btn').addEventListener('click', showCloudLoginOverlay);
   document.getElementById('cloud-logout-btn').addEventListener('click', async ()=>{
-    try{ await sb.auth.signOut(); }catch(e){ console.error('Falha ao sair da conta', e); }
+    const btn = document.getElementById('cloud-logout-btn');
+    btn.disabled = true; const originalText = btn.textContent; btn.textContent = 'Saindo...';
+    try{ await withCloudTimeout(sb.auth.signOut(), 5000); }
+    catch(e){ console.error('Falha ao sair da conta (rede ou tempo esgotado) — saindo mesmo assim localmente', e); }
+    finally{ btn.disabled = false; btn.textContent = originalText; }
+    // Mesmo se o signOut() na nuvem falhar/travar, a pessoa SEMPRE consegue voltar ao modo
+    // local — ficar "presa logada" só porque a nuvem não respondeu nunca deveria acontecer.
     resetCloudUiToLoggedOut();
   });
 
