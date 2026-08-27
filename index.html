@@ -94,6 +94,9 @@ nav#main-nav.floating button{ padding:8px 14px; font-size:.82em; flex-shrink:0; 
   .qtag-select:hover{ border-color:var(--gold-dim); color:var(--text); }
   .qtag-removable{ cursor:pointer; }
   .qtag-removable:hover{ background:rgba(224,92,92,.25); color:#ffb3b3; }
+  .draft-attrs{ display:flex; align-items:center; flex-wrap:wrap; gap:6px; padding:4px 0 10px; }
+  .draft-attr-pill{ display:inline-flex; align-items:center; font-size:.8em; padding:4px 10px; border-radius:14px; background:#150f28; border:1px solid #3a2f5c; color:var(--muted); cursor:pointer; user-select:none; }
+  .draft-attr-pill.checked{ background:var(--gold-dim); border-color:var(--gold); color:#241c0a; font-weight:bold; }
   .filters{ display:flex; gap:8px; margin:14px 0; flex-wrap:wrap; }
   .filters button{ background:#150f28; border:1px solid #3a2f5c; color:var(--muted); padding:6px 12px; border-radius:20px; cursor:pointer; font-size:.85em;}
   .filters button.active{ border-color:var(--gold); color:var(--gold); background:rgba(232,199,102,0.14); }
@@ -1389,7 +1392,8 @@ const SECONDARY_CATEGORY_KEYWORDS = {
   leitura: ['ler','leitura'],
   criatividade: ['brainstorm','ideias novas','criar conceito'],
   pratica: ['praticar','treinar a habilidade','exercicio pratico'],
-  comunidade: ['aba comunidade','post na comunidade','postagem na comunidade','community post']
+  comunidade: ['aba comunidade','post na comunidade','postagem na comunidade','community post'],
+  ia: ['inteligencia artificial','prompt','claude','chatgpt','gpt','ia generativa','agente de ia','automatizar com ia']
 
 };
 
@@ -1448,7 +1452,9 @@ criatividade:{label:'Criatividade', icon:'✨'},
 
 pratica:{label:'Prática', icon:'💫'},
 
-comunidade:{label:'Comunidade (aba Community)', icon:'💬'}
+comunidade:{label:'Comunidade (aba Community)', icon:'💬'},
+
+ia:{label:'IA', icon:'🤖'}
 
 };
 
@@ -5079,8 +5085,15 @@ return blocks.map(b=>{
     const autoProjectId = detectProjectFromText(fullText);
     if(autoProjectId) parsedFromText.projectId = autoProjectId;
 
-    const finalTitle = b.title.length>60 ? b.title.slice(0,57).trim()+'...' : b.title;
-    return Object.assign(parsedFromText, overrides, { title: finalTitle, desc, _explicit: Object.keys(overrides) });
+    const merged = Object.assign(parsedFromText, overrides, { title: b.title, desc, _explicit: Object.keys(overrides) });
+    // BUG CORRIGIDO: os atributos (Foco/Disciplina/Corpo/Mente/Criatividade) eram
+    // calculados a partir da categoria ADIVINHADA no texto inteiro (parseQuickInput),
+    // ANTES de qualquer correção da categoria de verdade ser aplicada. Se o texto falava
+    // em "dormir"/"sono", a categoria adivinhada virava Saúde (→ atributo Corpo), e mesmo
+    // quando a categoria certa (Foco/Trabalho) sobrescrevia depois, o atributo continuava
+    // errado, porque nunca era recalculado. Agora recalcula usando a categoria FINAL.
+    merged.attrs = guessAttrs(fullText.toLowerCase(), merged.category);
+    return merged;
   });
 }
 
@@ -5152,8 +5165,9 @@ function renderDraftPreview(){
   const catOptionsHtml = Object.entries(CATEGORIES).map(([key,info])=>`<option value="${key}">${info.icon} ${info.label}</option>`).join('');
   const diffOptionsHtml = Object.entries(DIFF_LABELS).map(([key,label])=>`<option value="${key}">${label}</option>`).join('');
   const secCatOptionsHtml = Object.entries(SECONDARY_CATEGORIES).map(([key,info])=>`<option value="${key}">${info.icon} ${info.label}</option>`).join('');
+  const ATTR_PREVIEW_LABELS = { foco:'Foco', disciplina:'Disciplina', corpo:'Corpo', mente:'Mente', criatividade:'Criatividade' };
 
-  box.innerHTML = '<b>Missões detectadas ('+draftQuests.length+') — edite o título, e clique nos campos coloridos abaixo pra corrigir tipo/categoria/dificuldade:</b>' +
+  box.innerHTML = '<b>Missões detectadas ('+draftQuests.length+') — edite o título, e clique nos campos coloridos abaixo pra corrigir tipo/categoria/dificuldade/atributos:</b>' +
         draftQuests.map((d,i)=>{
       const projName = d.projectId ? (state.projects.find(p=>p.id===d.projectId)||{}).title : null;
       return `<div class="draft-row">
@@ -5172,6 +5186,15 @@ function renderDraftPreview(){
         ${d.deadline?`<span class="qtag">📅 ${d.deadline}</span>`:''}
         ${d.recurring?`<span class="qtag">🔁 Diária</span>`:''}
         ${projName?`<span class="qtag">🗂️ ${escapeHtml(projName)}</span>`:''}
+      </div>
+      <div class="draft-attrs" data-di="${i}">
+        <small style="color:var(--muted); margin-right:4px;">Atributos:</small>
+        ${Object.entries(ATTR_PREVIEW_LABELS).map(([key,label])=>{
+          const checked = (d.attrs||[]).includes(key);
+          return `<label class="draft-attr-pill${checked?' checked':''}" data-di="${i}" data-attr="${key}">
+            <input type="checkbox" ${checked?'checked':''} style="display:none;"> ${label}
+          </label>`;
+        }).join('')}
       </div>`;
     }).join('') +
     `<div class="btn-row"><button class="btn" id="confirm-drafts">✅ Criar missões selecionadas</button>
@@ -5193,6 +5216,16 @@ function renderDraftPreview(){
     if(!val) return;
     const d = draftQuests[di];
     d.secondaryCategories = [...new Set([...(d.secondaryCategories||[]), val])];
+    renderDraftPreview();
+  }));
+  // Clicar numa pílula de atributo liga/desliga ele pra aquela missão.
+  box.querySelectorAll('.draft-attr-pill').forEach(el=>el.addEventListener('click', e=>{
+    e.preventDefault();
+    const di = e.currentTarget.dataset.di, attr = e.currentTarget.dataset.attr;
+    const d = draftQuests[di];
+    const set = new Set(d.attrs||[]);
+    if(set.has(attr)) set.delete(attr); else set.add(attr);
+    d.attrs = Array.from(set);
     renderDraftPreview();
   }));
 
