@@ -1313,6 +1313,42 @@ prazo: 25/08/2026</div>
 <!-- SDK do Supabase (sincronização entre aparelhos) -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script>
+/* ============ BLINDAGEM DE ARMAZENAMENTO ============
+   Alguns navegadores (ex.: Opera GX com certas configurações de privacidade) BLOQUEIAM o
+   localStorage completamente — toda chamada (leitura OU escrita) lança um erro. Como o
+   código inteiro usa localStorage.getItem/setItem direto em dezenas de lugares (trocar de
+   aba, abrir a tela de login da nuvem, etc.), um bloqueio assim travava a página inteira
+   assim que qualquer uma dessas chamadas não-blindadas era executada.
+   Em vez de caçar e blindar cada chamada uma por uma, substituímos o localStorage por um
+   "substituto" que nunca lança erro: se o de verdade funcionar, ele é só um repasse
+   transparente; se estiver bloqueado, cai pra um armazenamento só-em-memória (funciona
+   normalmente durante a sessão, mas não persiste entre visitas até o bloqueio ser
+   removido) — o app continua 100% usável de qualquer jeito, só sem salvar localmente. */
+(function ensureSafeLocalStorage(){
+  try{
+    const testKey = '__storage_probe__';
+    window.localStorage.setItem(testKey, '1');
+    window.localStorage.removeItem(testKey);
+    return; // localStorage funciona normalmente — nada a fazer
+  }catch(e){
+    console.error('localStorage bloqueado pelo navegador — usando um substituto só-nesta-sessão. Dados não vão persistir entre visitas até isso ser liberado nas configurações do navegador.', e);
+  }
+  const memoryStore = {};
+  const fakeStorage = {
+    getItem(key){ return Object.prototype.hasOwnProperty.call(memoryStore, key) ? memoryStore[key] : null; },
+    setItem(key, value){ memoryStore[key] = String(value); },
+    removeItem(key){ delete memoryStore[key]; },
+    clear(){ Object.keys(memoryStore).forEach(k=>delete memoryStore[k]); },
+    key(i){ return Object.keys(memoryStore)[i] || null; },
+    get length(){ return Object.keys(memoryStore).length; }
+  };
+  try{
+    Object.defineProperty(window, 'localStorage', { value: fakeStorage, configurable: true });
+  }catch(e2){
+    console.error('Não foi possível nem substituir o localStorage — algumas telas podem não funcionar.', e2);
+  }
+})();
+
 /* ============ DADOS BASE ============ */
 const CATEGORIES = {
 
@@ -2865,7 +2901,10 @@ async function initCloudSync(){
   document.getElementById('cloud-login-submit').addEventListener('click', doCloudLoginSubmit);
   document.getElementById('cloud-login-password').addEventListener('keydown', (e)=>{ if(e.key==='Enter') doCloudLoginSubmit(); });
   document.getElementById('cloud-login-skip').addEventListener('click', ()=>{
-    localStorage.setItem(CLOUD_SKIP_KEY, '1');
+    // Se o navegador estiver bloqueando localStorage, esse setItem lançava um erro e
+    // travava o clique ANTES de fechar a tela — a pessoa ficava presa atrás do fundo
+    // escuro sem conseguir sair. Agora a tela sempre fecha, com ou sem storage.
+    try{ localStorage.setItem(CLOUD_SKIP_KEY, '1'); }catch(e){ console.error('Não foi possível lembrar de pular o login (localStorage bloqueado)', e); }
     hideCloudLoginOverlay();
   });
   document.getElementById('cloud-login-again-btn').addEventListener('click', showCloudLoginOverlay);
@@ -2874,12 +2913,26 @@ async function initCloudSync(){
     resetCloudUiToLoggedOut();
   });
 
-  const { data: { session } } = await sb.auth.getSession();
+  // O SDK do Supabase também usa localStorage por baixo dos panos (pra lembrar sua sessão
+  // entre visitas) — se o navegador estiver bloqueando storage, essa chamada pode lançar
+  // um erro e travar a sincronização inteira pela metade. Com o try/catch, na pior das
+  // hipóteses você só precisa logar de novo a cada visita — mas o app continua funcionando.
+  let session = null;
+  try{
+    const result = await sb.auth.getSession();
+    session = result.data.session;
+  }catch(err){
+    console.error('Falha ao verificar sessão da nuvem (armazenamento local pode estar bloqueado)', err);
+  }
   if(session){
     await afterCloudLogin(session);
   } else {
     resetCloudUiToLoggedOut();
-    if(!localStorage.getItem(CLOUD_SKIP_KEY)) showCloudLoginOverlay();
+    // Mesma proteção aqui: ler o localStorage também pode lançar erro se estiver
+    // bloqueado — sem o try/catch, isso impedia até de SABER se devia mostrar a tela.
+    let alreadySkipped = false;
+    try{ alreadySkipped = !!localStorage.getItem(CLOUD_SKIP_KEY); }catch(e){}
+    if(!alreadySkipped) showCloudLoginOverlay();
   }
 }
 
