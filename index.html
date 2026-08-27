@@ -404,6 +404,8 @@ color:#0b0918; font-size:.62em; font-weight:bold; padding:2px 6px; border-radius
 .qp-tag{ font-size:.66em; padding:2px 7px; border-radius:8px; background:#241c3d; color:var(--muted); white-space:nowrap; }
 #goal-linked-search, #ach-linked-search{ margin-top:6px; width:100%; }
 .vg-charts-grid{ display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+.chart-wrap{ position:relative; width:100%; }
+@media (max-width:640px){ .chart-wrap{ height:200px !important; } }
 .vg-charts-grid > div{ min-width:0; overflow:hidden; }
 #pomo-ranking-list{ min-width:0; }
 .rank-row{ min-width:0; max-width:100%; }
@@ -819,7 +821,7 @@ prazo: 25/08/2026</div>
         <button data-range="12m">12 meses</button>
       </div>
     </div>
-<canvas id="chart-xp" height="90"></canvas>
+<div class="chart-wrap" style="height:180px;"><canvas id="chart-xp"></canvas></div>
 </div>
 
 <div class="card">
@@ -830,11 +832,11 @@ prazo: 25/08/2026</div>
 <div class="vg-charts-grid">
 <div class="card">
 <h2 style="border:none; margin-bottom:6px;">📊 Missões por Categoria (30 dias)</h2>
-<canvas id="chart-cat" height="110"></canvas>
+<div class="chart-wrap" style="height:220px;"><canvas id="chart-cat"></canvas></div>
 </div>
 <div class="card">
 <h2 style="border:none; margin-bottom:6px;">🎯 Distribuição por Dificuldade (30 dias)</h2>
-<canvas id="chart-diff" height="110"></canvas>
+<div class="chart-wrap" style="height:220px;"><canvas id="chart-diff"></canvas></div>
 </div>
 </div>
 
@@ -920,17 +922,17 @@ prazo: 25/08/2026</div>
 <div class="vg-charts-grid" style="margin-top:16px;">
 <div>
 <h3 style="color:var(--gold); font-size:.92em; margin-bottom:6px;">⏱️ Tempo de foco por dia</h3>
-<canvas id="chart-pomo-daily" height="140"></canvas>
+<div class="chart-wrap" style="height:220px;"><canvas id="chart-pomo-daily"></canvas></div>
 </div>
 <div>
 <h3 style="color:var(--gold); font-size:.92em; margin-bottom:6px;">🗂️ Tempo por categoria</h3>
-<canvas id="chart-pomo-cat" height="140"></canvas>
+<div class="chart-wrap" style="height:220px;"><canvas id="chart-pomo-cat"></canvas></div>
 </div>
 </div>
 <div class="vg-charts-grid" style="margin-top:16px;">
 <div>
 <h3 style="color:var(--gold); font-size:.92em; margin-bottom:6px;">🏷️ Principal x Secundária x Hábito</h3>
-<canvas id="chart-pomo-type" height="140"></canvas>
+<div class="chart-wrap" style="height:220px;"><canvas id="chart-pomo-type"></canvas></div>
 </div>
 <div>
 <h3 style="color:var(--gold); font-size:.92em; margin-bottom:6px;">🏆 Missões com mais tempo investido</h3>
@@ -4951,9 +4953,46 @@ function mapRecurringWord(w){
   return null;
 }
 
+// Pra bater "Foco e Trabalho" com o rótulo oficial "Foco/Trabalho" (conectores e barras
+// diferentes), comparamos por CONJUNTO DE PALAVRAS em vez de string exata — ignora
+// conectores curtos (e, de, do...) e pontuação.
+const WORD_CONNECTORS = new Set(['e','de','do','da','dos','das','com','em','a','o','os','as']);
+function significantWordsSet(str){
+  return new Set(normalizeText(str).split(/[^a-z0-9]+/).filter(w => w.length>1 && !WORD_CONNECTORS.has(w)));
+}
+function bareLineMatchesLabel(lineWords, labelWords){
+  if(labelWords.size===0) return false;
+  for(const w of labelWords){ if(!lineWords.has(w)) return false; }
+  return true;
+}
+// Acha categoria PRINCIPAL cujo rótulo bate por completo com as palavras da linha.
+function matchBareCategoryLine(line){
+  const lineWords = significantWordsSet(line);
+  if(lineWords.size===0) return null;
+  for(const [key, info] of Object.entries(CATEGORIES)){
+    if(bareLineMatchesLabel(lineWords, significantWordsSet(info.label))) return key;
+  }
+  return null;
+}
+
+// Categoria SECUNDÁRIA a partir de linha solta — mais tolerante que a principal: basta
+// UMA palavra do rótulo bater (não todas), já que aqui costuma vir como uma palavra só,
+// tipo "edição" pra "Edição de Vídeo".
+function matchBareSecondaryCategoryLine(line){
+  const lineWords = significantWordsSet(line);
+  if(lineWords.size===0) return null;
+  for(const [key, info] of Object.entries(SECONDARY_CATEGORIES)){
+    const labelWords = significantWordsSet(info.label);
+    for(const w of labelWords){ if(lineWords.has(w)) return key; }
+  }
+  return null;
+}
+
 function extractStructuredTags(lines){
   const overrides = {};
   const remaining = [];
+  const secCatsFound = [];
+  let primarySetByBareLine = false;
   lines.forEach(line=>{
     let matched = false;
     for(const [key, regex] of Object.entries(STRUCTURED_TAG_PATTERNS)){
@@ -4962,7 +5001,7 @@ function extractStructuredTags(lines){
         matched = true;
         const value = m[2].trim();
         if(key==='tipo'){ const v=mapTypeWord(value); if(v) overrides.type=v; }
-        else if(key==='categoria'){ const v=mapCategoryWord(value); if(v) overrides.category=v; }
+        else if(key==='categoria'){ const v=mapCategoryWord(value); if(v){ overrides.category=v; primarySetByBareLine=true; } }
         else if(key==='secundarias'){ const v=mapSecondaryCatWords(value); if(v.length) overrides.secondaryCategories=v; }
         else if(key==='dificuldade'){ const v=mapDifficultyWord(value); if(v) overrides.difficulty=v; }
         else if(key==='prazo'){ const v=mapDateWord(value); if(v) overrides.deadline=v; }
@@ -4971,8 +5010,28 @@ function extractStructuredTags(lines){
         break;
       }
     }
+    // Sem o prefixo "categoria:"/"secundarias:", mas ainda assim uma linha CURTA que só
+    // contém o nome de uma categoria (ex.: "Foco e Trabalho", "edição", "criatividade")?
+    // Trata como se fosse a tag estruturada — sem isso, essas linhas viravam parte da
+    // descrição, e a categoria de verdade era "adivinhada" escaneando o texto inteiro
+    // (nada confiável: uma história sobre "dormir" batia com Saúde antes de bater com
+    // Foco/Trabalho, mesmo você tendo escrito a categoria certa explicitamente).
+    // Só a PRIMEIRA linha desse tipo vira categoria PRINCIPAL — as próximas (ex.:
+    // "criatividade" depois de "Foco e Trabalho") viram categoria SECUNDÁRIA, nunca
+    // sobrescrevem a principal já definida.
+    if(!matched && line.trim().length>0 && line.trim().length<=40 && line.trim().split(/\s+/).length<=4){
+      if(!primarySetByBareLine){
+        const bareCat = matchBareCategoryLine(line);
+        if(bareCat){ overrides.category = bareCat; primarySetByBareLine = true; matched = true; }
+      }
+      if(!matched){
+        const bareSec = matchBareSecondaryCategoryLine(line);
+        if(bareSec){ secCatsFound.push(bareSec); matched = true; }
+      }
+    }
     if(!matched) remaining.push(line);
   });
+  if(secCatsFound.length) overrides.secondaryCategories = [...new Set([...(overrides.secondaryCategories||[]), ...secCatsFound])];
   return { overrides, descLines: remaining };
 }
 
@@ -6290,6 +6349,7 @@ function renderXPChart(rangeKey){
       }]
     },
     options:{
+      maintainAspectRatio:false,
       responsive:true,
       plugins:{ legend:{display:false} },
       scales:{
@@ -6389,6 +6449,7 @@ function renderCategoryChart(){
       datasets:[{ label:'Missões concluídas', data: keys.map(k=>data[k]), backgroundColor: keys.map(k=>GOAL_CATEGORY_COLORS[k] || '#8a6dff') }]
     },
     options:{
+      maintainAspectRatio:false,
       plugins:{ legend:{display:false} },
       scales:{
         x:{ ticks:{color:'#9d97b8'}, grid:{display:false} },
@@ -6409,7 +6470,8 @@ function renderDifficultyChart(){
       labels: keys.map(k=>DIFF_LABELS[k]||k),
       datasets:[{ data: keys.map(k=>data[k]), backgroundColor: keys.map(k=>DIFF_COLORS[k]||'#6b6485') }]
     },
-    options:{ plugins:{ legend:{ position:'bottom', labels:{ color:'#9d97b8' } } } }
+    options:{
+      maintainAspectRatio:false, plugins:{ legend:{ position:'bottom', labels:{ color:'#9d97b8' } } } }
   });
 }
 
@@ -6540,6 +6602,7 @@ function renderPomoDailyChart(rangeKey){
     type:'bar',
     data:{ labels: points.map(p=>p.label), datasets:[{ label:'Horas de foco', data: series, backgroundColor:'#e8c766' }] },
     options:{
+      maintainAspectRatio:false,
       plugins:{
         legend:{display:false},
         tooltip:{ callbacks:{ label:(ctx)=>' '+formatHoursLabel(ctx.parsed.y) } }
@@ -6587,6 +6650,7 @@ datasets:[{ label:'Horas', data: keys.map(k=>+(totals[k]/60).toFixed(2)), backgr
 },
 
 options:{
+      maintainAspectRatio:false,
 
 indexAxis:'y',
 
@@ -6628,7 +6692,8 @@ function renderPomoTypeChart(rangeKey){
       labels: keys.map(k=>labels[k]),
       datasets:[{ data: keys.map(k=>+(totals[k]/60).toFixed(2)), backgroundColor:['#e8c766','#5cb8e0','#8a5cf6','#6b6485'] }]
     },
-    options:{ plugins:{
+    options:{
+      maintainAspectRatio:false, plugins:{
       legend:{ position:'bottom', labels:{ color:'#9d97b8' } },
       tooltip:{ callbacks:{ label:(ctx)=>` ${ctx.label}: ${formatHoursLabel(ctx.parsed)}` } }
     } }
