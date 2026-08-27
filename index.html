@@ -2480,6 +2480,20 @@ let cloudPushTimer = null;
 let cloudChannel = null;
 let applyingRemote = false; // trava pra não reagir ao nosso próprio eco vindo do realtime
 
+// BLINDAGEM GERAL: nenhuma chamada de rede pra nuvem (login, salvar, buscar) pode ficar
+// pendurada pra sempre — foi exatamente isso que travou a tela numa sincronização anterior
+// (o indicador ficou preso em "verificando..." e nada mais respondia). Esta função corre a
+// chamada real contra um cronômetro: se a nuvem não responder dentro do tempo, a promise
+// rejeita com um erro claro, e quem chamou pode tratar isso normalmente — o app nunca fica
+// esperando pra sempre por uma resposta que talvez nunca chegue.
+function withCloudTimeout(promise, ms = 8000){
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('cloud_timeout: a nuvem não respondeu a tempo')), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 // Desvio estimado entre o relógio de sistema DESTE aparelho e o do outro aparelho (em ms).
 // Positivo = o relógio deste aparelho está adiantado em relação ao do outro. É isso que
 // explicava a diferença de alguns segundos no cronômetro do Pomodoro entre PC e celular:
@@ -2780,11 +2794,11 @@ async function pushCloudStateNow(){
   try{
     setCloudIndicator('☁ enviando...');
     const { sounds, ...stateToSave } = state;
-    const { error } = await sb.from('app_state').upsert({
+    const { error } = await withCloudTimeout(sb.from('app_state').upsert({
       user_id: cloudUserId,
       data: stateToSave,
       updated_at: new Date().toISOString()
-    });
+    }));
     if(error){ console.error('Falha ao enviar estado pra nuvem', error); setCloudIndicator('☁ falha ao enviar'); return; }
     setCloudIndicator('☁ sincronizado às ' + new Date().toLocaleTimeString('pt-BR'));
   }catch(err){
@@ -2825,7 +2839,20 @@ function scheduleCloudPush(){
 async function pullCloudStateAndMerge(){
   if(!sb || !cloudUserId) return;
   setCloudIndicator('☁ verificando...');
-  const { data, error } = await sb.from('app_state').select('data, updated_at').eq('user_id', cloudUserId).maybeSingle();
+  // CORRIGIDO — esta função não tinha NENHUM try/catch: se a chamada travasse ou desse
+  // qualquer erro fora do padrão esperado, ela parava no meio pra sempre, sem devolver o
+  // controle pro resto do app. Foi exatamente isso que deixou o indicador preso em
+  // "verificando..." numa sincronização anterior. Agora, com timeout + try/catch, o pior
+  // cenário é uma mensagem de erro clara — nunca mais um travamento silencioso.
+  let data, error;
+  try{
+    const result = await withCloudTimeout(sb.from('app_state').select('data, updated_at').eq('user_id', cloudUserId).maybeSingle());
+    data = result.data; error = result.error;
+  }catch(err){
+    console.error('Falha ao buscar estado da nuvem (rede ou tempo esgotado)', err);
+    setCloudIndicator('☁ sem conexão');
+    return;
+  }
   if(error){ console.error('Falha ao buscar estado da nuvem', error); setCloudIndicator('☁ falha ao verificar'); return; }
   if(!data){
     // Ainda não existe nada salvo na nuvem pra esse usuário — este aparelho vira a base inicial.
@@ -2851,22 +2878,26 @@ async function pullCloudStateAndMerge(){
 
 function subscribeCloudRealtime(){
   if(!sb || !cloudUserId) return;
-  if(cloudChannel) sb.removeChannel(cloudChannel);
-  cloudChannel = sb.channel('app_state_changes_' + cloudUserId)
-    .on('postgres_changes', { event:'*', schema:'public', table:'app_state', filter:'user_id=eq.'+cloudUserId }, (payload)=>{
-      const incoming = payload.new && payload.new.data;
-      if(!incoming) return;
-      const incomingUpdatedAt = incoming.updatedAt || 0;
-      const localUpdatedAt = state.updatedAt || 0;
-      // Se for igual ou mais velho que o que já temos, é só o eco do que ESTE aparelho
-      // acabou de enviar — ignora, senão entra num vaivém sem necessidade.
-      if(incomingUpdatedAt <= localUpdatedAt) return;
-      const changed = applyRemoteState(incoming); // mescla (ver mergeCloudState) — nunca substitui o estado local
-      if(changed) showNotif({icon:'☁', title:'Atualizado em tempo real', sub:'O outro aparelho mudou algo agora.'});
-      // Se a mesclagem trouxe algo que só existia aqui localmente também, propaga de volta.
-      if(changed) scheduleCloudPush();
-    })
-    .subscribe();
+  try{
+    if(cloudChannel) sb.removeChannel(cloudChannel);
+    cloudChannel = sb.channel('app_state_changes_' + cloudUserId)
+      .on('postgres_changes', { event:'*', schema:'public', table:'app_state', filter:'user_id=eq.'+cloudUserId }, (payload)=>{
+        try{
+          const incoming = payload.new && payload.new.data;
+          if(!incoming) return;
+          const incomingUpdatedAt = incoming.updatedAt || 0;
+          const localUpdatedAt = state.updatedAt || 0;
+          // Se for igual ou mais velho que o que já temos, é só o eco do que ESTE aparelho
+          // acabou de enviar — ignora, senão entra num vaivém sem necessidade.
+          if(incomingUpdatedAt <= localUpdatedAt) return;
+          const changed = applyRemoteState(incoming); // mescla (ver mergeCloudState) — nunca substitui o estado local
+          if(changed) showNotif({icon:'☁', title:'Atualizado em tempo real', sub:'O outro aparelho mudou algo agora.'});
+          // Se a mesclagem trouxe algo que só existia aqui localmente também, propaga de volta.
+          if(changed) scheduleCloudPush();
+        }catch(err){ console.error('Falha ao processar atualização em tempo real da nuvem', err); }
+      })
+      .subscribe();
+  }catch(err){ console.error('Falha ao assinar o canal em tempo real da nuvem', err); }
 }
 
 async function afterCloudLogin(session){
@@ -2876,8 +2907,8 @@ async function afterCloudLogin(session){
   setCloudAccountStatus('Conectado como ' + cloudUserEmail + '.');
   document.getElementById('cloud-logout-btn').style.display = 'inline-block';
   document.getElementById('cloud-login-again-btn').style.display = 'none';
-  await pullCloudStateAndMerge();
-  subscribeCloudRealtime();
+  await pullCloudStateAndMerge(); // já nunca lança erro (ver comentário lá dentro)
+  safeInit(subscribeCloudRealtime, 'assinatura em tempo real da nuvem');
 }
 
 function resetCloudUiToLoggedOut(){
@@ -2914,10 +2945,10 @@ async function initCloudSync(){
   // clica em "Entrar / Sincronizar" nas Configurações, por vontade própria, quando quiser.
   let session = null;
   try{
-    const result = await sb.auth.getSession();
+    const result = await withCloudTimeout(sb.auth.getSession());
     session = result.data.session;
   }catch(err){
-    console.error('Falha ao verificar sessão da nuvem (armazenamento local pode estar bloqueado)', err);
+    console.error('Falha ao verificar sessão da nuvem (armazenamento local pode estar bloqueado, ou rede/tempo esgotado)', err);
   }
   if(session){
     await afterCloudLogin(session);
@@ -2934,10 +2965,20 @@ async function doCloudLoginSubmit(){
   if(!email || !password){ errEl.textContent = 'Preencha e-mail e senha.'; return; }
   const submitBtn = document.getElementById('cloud-login-submit');
   submitBtn.disabled = true; submitBtn.textContent = 'Entrando...';
-  const { data, error } = await sb.auth.signInWithPassword({ email, password });
-  submitBtn.disabled = false; submitBtn.textContent = 'Entrar';
-  if(error){ errEl.textContent = 'E-mail ou senha incorretos.'; return; }
-  await afterCloudLogin(data.session);
+  // CORRIGIDO — esta função não tinha NENHUM try/catch: se o login travasse ou desse
+  // qualquer erro fora do esperado, o botão ficava preso em "Entrando..." pra sempre,
+  // e a tela de login nunca mais fechava (nem dava pra tentar de novo). Com o try/catch
+  // + finally, o botão SEMPRE volta ao normal, não importa o que aconteça.
+  try{
+    const { data, error } = await withCloudTimeout(sb.auth.signInWithPassword({ email, password }));
+    if(error){ errEl.textContent = 'E-mail ou senha incorretos.'; return; }
+    await afterCloudLogin(data.session);
+  }catch(err){
+    console.error('Falha ao entrar na nuvem (rede ou tempo esgotado)', err);
+    errEl.textContent = 'Não foi possível conectar agora. Tente de novo em instantes.';
+  }finally{
+    submitBtn.disabled = false; submitBtn.textContent = 'Entrar';
+  }
 }
 
 
