@@ -90,6 +90,10 @@ nav#main-nav.floating button{ padding:8px 14px; font-size:.82em; flex-shrink:0; 
   .preview-box{ margin-top:10px; padding:10px; border-radius:8px; background:#0b0918; border:1px dashed var(--gold-dim); font-size:.88em; display:none; }
   .draft-row{ display:flex; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid #241c3d; flex-wrap:wrap; }
   .draft-row input[type=text]{ flex:1; min-width:160px; background:#150f28; border:1px solid #3a2f5c; color:var(--text); padding:6px; border-radius:6px; }
+  .qtag-select{ font-size:.85em; padding:3px 8px; border-radius:10px; background:#241c3d; border:1px solid #3a2f5c; color:var(--muted); cursor:pointer; }
+  .qtag-select:hover{ border-color:var(--gold-dim); color:var(--text); }
+  .qtag-removable{ cursor:pointer; }
+  .qtag-removable:hover{ background:rgba(224,92,92,.25); color:#ffb3b3; }
   .filters{ display:flex; gap:8px; margin:14px 0; flex-wrap:wrap; }
   .filters button{ background:#150f28; border:1px solid #3a2f5c; color:var(--muted); padding:6px 12px; border-radius:20px; cursor:pointer; font-size:.85em;}
   .filters button.active{ border-color:var(--gold); color:var(--gold); background:rgba(232,199,102,0.14); }
@@ -5067,8 +5071,11 @@ return blocks.map(b=>{
     const fullText = b.title + ' ' + desc;
     const parsedFromText = parseQuickInput(fullText);
 
-    const autoSecCats = detectSecondaryCategories(fullText);
-    if(autoSecCats.length) parsedFromText.secondaryCategories = autoSecCats;
+    // Sem a varredura automática de categoria secundária aqui: no modo formatado, o texto
+    // costuma ser uma descrição corrida (frases normais), e palavras como "roteiro" numa
+    // frase comum ("pegar o roteiro gerado antes") ou "jogar" no sentido de "inserir"
+    // disparavam tags que você nunca pediu. Categoria secundária só vem de tag explícita
+    // (secundarias: ...) ou de uma linha curta dedicada — já tratadas em extractStructuredTags.
     const autoProjectId = detectProjectFromText(fullText);
     if(autoProjectId) parsedFromText.projectId = autoProjectId;
 
@@ -5141,17 +5148,27 @@ function renderDraftPreview(){
   const box = document.getElementById('quick-preview');
   if(draftQuests.length===0){ box.style.display='none'; return; }
   box.style.display='block';
-  box.innerHTML = '<b>Missões detectadas ('+draftQuests.length+') — edite os títulos se quiser:</b>' +
+  const typeOptionsHtml = `<option value="main">Principal</option><option value="side">Secundária</option><option value="habit">Hábito</option>`;
+  const catOptionsHtml = Object.entries(CATEGORIES).map(([key,info])=>`<option value="${key}">${info.icon} ${info.label}</option>`).join('');
+  const diffOptionsHtml = Object.entries(DIFF_LABELS).map(([key,label])=>`<option value="${key}">${label}</option>`).join('');
+  const secCatOptionsHtml = Object.entries(SECONDARY_CATEGORIES).map(([key,info])=>`<option value="${key}">${info.icon} ${info.label}</option>`).join('');
+
+  box.innerHTML = '<b>Missões detectadas ('+draftQuests.length+') — edite o título, e clique nos campos coloridos abaixo pra corrigir tipo/categoria/dificuldade:</b>' +
         draftQuests.map((d,i)=>{
-      const cat = CATEGORIES[d.category];
       const projName = d.projectId ? (state.projects.find(p=>p.id===d.projectId)||{}).title : null;
       return `<div class="draft-row">
         <input type="checkbox" checked data-di="${i}" class="draft-check">
         <input type="text" value="${escapeHtml(d.title)}" data-di="${i}" class="draft-title">
-        <span class="qtag">${d.type==='main'?'Principal':d.type==='habit'?'Hábito':'Secundária'}</span>
-        <span class="qtag">${cat.icon} ${cat.label}</span>
-        <span class="qtag">${DIFF_LABELS[d.difficulty]||d.difficulty}</span>
-        ${(d.secondaryCategories||[]).map(sc=>`<span class="qtag">${SECONDARY_CATEGORIES[sc]?SECONDARY_CATEGORIES[sc].icon+' '+SECONDARY_CATEGORIES[sc].label:sc}</span>`).join('')}
+        <select class="qtag-select draft-type" data-di="${i}">${typeOptionsHtml}</select>
+        <select class="qtag-select draft-cat" data-di="${i}">${catOptionsHtml}</select>
+        <select class="qtag-select draft-diff" data-di="${i}">${diffOptionsHtml}</select>
+        <span class="draft-seccats" data-di="${i}">
+          ${(d.secondaryCategories||[]).map(sc=>`<span class="qtag qtag-removable" data-di="${i}" data-sc="${sc}" title="Clique pra remover">${SECONDARY_CATEGORIES[sc]?SECONDARY_CATEGORIES[sc].icon+' '+SECONDARY_CATEGORIES[sc].label:sc} ✕</span>`).join('')}
+        </span>
+        <select class="qtag-select draft-addsec" data-di="${i}">
+          <option value="">+ categoria secundária</option>
+          ${secCatOptionsHtml}
+        </select>
         ${d.deadline?`<span class="qtag">📅 ${d.deadline}</span>`:''}
         ${d.recurring?`<span class="qtag">🔁 Diária</span>`:''}
         ${projName?`<span class="qtag">🗂️ ${escapeHtml(projName)}</span>`:''}
@@ -5159,7 +5176,26 @@ function renderDraftPreview(){
     }).join('') +
     `<div class="btn-row"><button class="btn" id="confirm-drafts">✅ Criar missões selecionadas</button>
      <button class="btn" id="cancel-drafts">Cancelar</button></div>`;
+
   box.querySelectorAll('.draft-title').forEach(inp=>inp.addEventListener('input', e=>{ draftQuests[e.target.dataset.di].title = e.target.value; }));
+  box.querySelectorAll('.draft-type').forEach(sel=>{ sel.value = draftQuests[sel.dataset.di].type; sel.addEventListener('change', e=>{ draftQuests[e.target.dataset.di].type = e.target.value; }); });
+  box.querySelectorAll('.draft-cat').forEach(sel=>{ sel.value = draftQuests[sel.dataset.di].category; sel.addEventListener('change', e=>{ draftQuests[e.target.dataset.di].category = e.target.value; }); });
+  box.querySelectorAll('.draft-diff').forEach(sel=>{ sel.value = draftQuests[sel.dataset.di].difficulty; sel.addEventListener('change', e=>{ draftQuests[e.target.dataset.di].difficulty = e.target.value; }); });
+  // Clicar num badge de categoria secundária já marcada remove ela (um clique, sem menu).
+  box.querySelectorAll('.qtag-removable').forEach(el=>el.addEventListener('click', e=>{
+    const di = e.currentTarget.dataset.di, sc = e.currentTarget.dataset.sc;
+    draftQuests[di].secondaryCategories = (draftQuests[di].secondaryCategories||[]).filter(x=>x!==sc);
+    renderDraftPreview();
+  }));
+  // Escolher no seletor "+ categoria secundária" adiciona na hora.
+  box.querySelectorAll('.draft-addsec').forEach(sel=>sel.addEventListener('change', e=>{
+    const di = e.target.dataset.di, val = e.target.value;
+    if(!val) return;
+    const d = draftQuests[di];
+    d.secondaryCategories = [...new Set([...(d.secondaryCategories||[]), val])];
+    renderDraftPreview();
+  }));
+
   document.getElementById('confirm-drafts').addEventListener('click', ()=>{
     draftQuests.forEach((d,i)=>{
       const checkbox = box.querySelector(`.draft-check[data-di="${i}"]`);
