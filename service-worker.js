@@ -13,7 +13,7 @@
 // troque o número aqui embaixo (v3 -> v4 -> v5...). Isso avisa o navegador de todo mundo
 // "isto aqui é uma versão nova de verdade, jogue fora o que você tinha guardado" — foi a
 // falta disso que fez uma versão quebrada antiga ficar grudada nos navegadores antes.
-const CACHE_NAME = 'cronicas-da-rotina-v3';
+const CACHE_NAME = 'cronicas-da-rotina-v4';
 
 const APP_SHELL = [
   './index.html',
@@ -58,6 +58,20 @@ self.addEventListener('activate', (event) => {
       .catch((err) => console.error('[SW] Falha ao limpar caches antigos', err))
   );
   self.clients.claim(); // assume o controle das abas já abertas, sem precisar fechar e reabrir
+});
+
+// Clique numa notificação do Pomodoro (ciclo de foco/pausa terminou) — traz a aba do app
+// pra frente se já estiver aberta, ou abre uma nova se tiver sido fechada.
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+      for (const client of clientList) {
+        if ('focus' in client) return client.focus();
+      }
+      if (self.clients.openWindow) return self.clients.openWindow('./index.html');
+    })
+  );
 });
 
 self.addEventListener('fetch', (event) => {

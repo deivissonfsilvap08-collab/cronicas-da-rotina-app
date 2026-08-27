@@ -872,7 +872,11 @@ prazo: 25/08/2026</div>
     <div class="card">
       <h2>Sessão de Foco</h2>
       <label>Vincular a uma missão (opcional):</label>
-      <select id="pomo-quest-select"><option value="">Nenhuma</option></select>
+      <div style="position:relative;">
+        <input type="text" id="pomo-quest-search" placeholder="🔍 Buscar missão pelo título..." autocomplete="off" style="width:100%;">
+        <div id="pomo-quest-dropdown" class="quest-picker" style="display:none; position:absolute; left:0; right:0; z-index:50;"></div>
+      </div>
+      <select id="pomo-quest-select" style="display:none;"><option value="">Nenhuma</option></select>
       <div class="pomo-settings-row">
         <label>Foco (min)<input type="number" id="pomo-work" value="25"></label>
         <label>Pausa (min)<input type="number" id="pomo-break" value="5"></label>
@@ -882,6 +886,10 @@ prazo: 25/08/2026</div>
         <label class="pomo-check"><input type="checkbox" id="pomo-auto-advance"> 🔁 Avançar automaticamente (foco ↔ pausa)</label>
         <label class="pomo-check"><input type="checkbox" id="pomo-reset-default"> ↺ Sempre voltar ao padrão (25/5/15) ao recarregar</label>
       </div>
+      <div class="pomo-settings-row">
+        <label class="pomo-check"><input type="checkbox" id="pomo-notifications"> 🔔 Notificar quando o ciclo terminar (mesmo com o app minimizado)</label>
+      </div>
+      <small class="hint" id="pomo-notifications-hint" style="display:none;"></small>
 </div>
 <div id="pomo-cycle" style="text-align:center; color:var(--muted); font-size:.85em; margin-top:10px;">Ciclo 1 de 4</div>
 <div class="pomo-timer" id="pomo-display">25:00</div>
@@ -1995,7 +2003,7 @@ deletedIds:{ quests:{}, projects:{}, goals:{}, achievements:{}, badges:{} },
 sounds:{ complete:null, levelup:null, achievement:null, click:null, pomo_work_end:null, pomo_break_end:null, pomo_start:null, deadline_alert:null },
 pomodoroLog: [],
 
-pomodoroSettings: { autoAdvance:false, workMinutes:25, breakMinutes:5, longBreakMinutes:15, alwaysDefault:false },
+pomodoroSettings: { autoAdvance:false, workMinutes:25, breakMinutes:5, longBreakMinutes:15, alwaysDefault:false, notificationsEnabled:false },
 
 pomodoroRuntime: { phase:'work', cycleCount:1, running:false, phaseStartedAt:null, endsAt:null, secondsLeft:null, plannedSeconds:null, questId:null },
 
@@ -5924,6 +5932,11 @@ function getPomoSelectCharLimit(){
   return 110;
 }
 
+// Cache com o título COMPLETO de cada missão (sem cortar) — usado pra pesquisa/filtro no
+// campo de busca. O <select> escondido continua guardando o valor de verdade; isso aqui é
+// só pra alimentar a lista visível de sugestões.
+let pomoQuestOptionsCache = [];
+
 function refreshPomoQuestSelect(){
 const sel = document.getElementById('pomo-quest-select');
 if(!sel) return;
@@ -5931,6 +5944,7 @@ const currentValue = sel.value || pendingPomoQuestId || '';
 sel.innerHTML = '<option value="">Nenhuma</option>';
 const pendentes = state.quests.filter(q => q && !q.done);
 const limit = getPomoSelectCharLimit();
+pomoQuestOptionsCache = pendentes.map(q => ({id:q.id, title:(q.title||'').toString()}));
 pendentes.forEach(q => {
 try{
 const opt = document.createElement('option');
@@ -5945,7 +5959,67 @@ console.error('Erro ao adicionar missão ao seletor do pomodoro:', q, e);
 });
 if(pendentes.some(q => q.id === currentValue)) sel.value = currentValue;
 pendingPomoQuestId = null;
+syncPomoQuestSearchDisplay();
 }
+
+// Mostra no campo de busca o título da missão atualmente vinculada (ou vazio, se nenhuma).
+function syncPomoQuestSearchDisplay(){
+  const search = document.getElementById('pomo-quest-search');
+  if(!search) return;
+  const sel = document.getElementById('pomo-quest-select');
+  const match = pomoQuestOptionsCache.find(q => q.id === sel.value);
+  search.value = match ? match.title : '';
+}
+
+function renderPomoQuestDropdown(filter){
+  const box = document.getElementById('pomo-quest-dropdown');
+  if(!box) return;
+  const f = normalizeText(filter||'');
+  const filtered = f ? pomoQuestOptionsCache.filter(q => normalizeText(q.title).includes(f)) : pomoQuestOptionsCache;
+  let html = `<label class="quest-picker-item" data-pomo-pick="">
+    <span class="qp-title" style="color:var(--muted); font-style:italic;">Nenhuma</span>
+  </label>`;
+  if(filtered.length===0 && f){
+    html += `<div style="padding:8px 10px;"><small class="hint">Nenhuma missão encontrada.</small></div>`;
+  } else {
+    html += filtered.map(q => `<label class="quest-picker-item" data-pomo-pick="${q.id}">
+      <span class="qp-title">${escapeHtml(q.title)}</span>
+    </label>`).join('');
+  }
+  box.innerHTML = html;
+  box.querySelectorAll('[data-pomo-pick]').forEach(row=>{
+    // mousedown (não click) dispara ANTES do blur do campo de busca — sem isso, o blur
+    // fecha a lista antes do clique no item ser registrado, e nada acontece.
+    row.addEventListener('mousedown', (e)=>{
+      e.preventDefault();
+      const id = row.getAttribute('data-pomo-pick');
+      const sel = document.getElementById('pomo-quest-select');
+      sel.value = id;
+      sel.dispatchEvent(new Event('change'));
+      syncPomoQuestSearchDisplay();
+      box.style.display = 'none';
+    });
+  });
+}
+
+safeInit(()=>{
+  const search = document.getElementById('pomo-quest-search');
+  const box = document.getElementById('pomo-quest-dropdown');
+  if(!search || !box) return;
+  search.addEventListener('focus', ()=>{
+    renderPomoQuestDropdown('');
+    box.style.display = 'block';
+    search.select(); // seleciona o texto todo, pra já poder digitar por cima e filtrar
+  });
+  search.addEventListener('input', (e)=>{
+    renderPomoQuestDropdown(e.target.value);
+    box.style.display = 'block';
+  });
+  search.addEventListener('blur', ()=>{
+    // pequeno atraso pra dar tempo do mousedown do item rodar antes de esconder a lista
+    setTimeout(()=>{ box.style.display = 'none'; syncPomoQuestSearchDisplay(); }, 150);
+  });
+}, 'busca de missão no Pomodoro');
 
 /* ============ METAS (SISTEMA DE OBJETIVOS DE LONGO PRAZO) ============ */
 const GOAL_CATEGORY_COLORS = { saude:'#5fd68a', estudo:'#5cb8e0', foco:'#e8c766', criatividade:'#8a5cf6', habito:'#e05c5c', lazer:'#e0a75c', geral:'#9d97b8' };
@@ -6976,6 +7050,58 @@ document.getElementById('pomo-auto-advance').addEventListener('change', e=>{
   persistNow();
 });
 
+/* ============ Notificações do Pomodoro (avisa quando o ciclo termina, mesmo com o app
+   minimizado/em segundo plano) ============ */
+function updatePomoNotificationsHint(){
+  const hint = document.getElementById('pomo-notifications-hint');
+  if(!hint) return;
+  if(!('Notification' in window)){
+    hint.style.display = 'block';
+    hint.textContent = 'Este navegador não tem suporte a notificações.';
+  } else if(Notification.permission === 'denied'){
+    hint.style.display = 'block';
+    hint.textContent = 'As notificações estão bloqueadas nas configurações do navegador pra este site — permita manualmente pra usar isso.';
+  } else {
+    hint.style.display = 'none';
+  }
+}
+const pomoNotifCheckbox = document.getElementById('pomo-notifications');
+pomoNotifCheckbox.checked = !!state.pomodoroSettings.notificationsEnabled;
+updatePomoNotificationsHint();
+pomoNotifCheckbox.addEventListener('change', async (e)=>{
+  if(e.target.checked && 'Notification' in window && Notification.permission === 'default'){
+    // Só pode pedir permissão dentro de um gesto do usuário (este clique) — não dá pra
+    // pedir sozinho ao carregar a página, o navegador ignora.
+    try{ await Notification.requestPermission(); }catch(err){ console.error('Falha ao pedir permissão de notificação', err); }
+  }
+  if(e.target.checked && (!('Notification' in window) || Notification.permission !== 'granted')){
+    e.target.checked = false; // a pessoa negou ou não tem suporte — não finge que ligou
+  }
+  state.pomodoroSettings.notificationsEnabled = e.target.checked;
+  persistNow();
+  updatePomoNotificationsHint();
+});
+
+// Dispara uma notificação de VERDADE do sistema operacional (não o pop-up interno do
+// app) — só quando a pessoa ativou isso e só quando ela não está olhando pro app agora
+// (se já está na tela, ela já vê a mudança acontecer na hora, notificação seria só ruído).
+// Usa o Service Worker (reg.showNotification) em vez de "new Notification()" direto
+// porque, em PWA instalado no Android, é o único caminho que funciona de forma confiável.
+function notifyPomoPhase(title, body){
+  try{
+    if(!state.pomodoroSettings.notificationsEnabled) return;
+    if(!('Notification' in window) || Notification.permission !== 'granted') return;
+    if(document.visibilityState === 'visible') return;
+    const payload = { body, icon:'./icon-192.png', badge:'./icon-192.png', tag:'pomo-phase', renotify:true };
+    if('serviceWorker' in navigator){
+      navigator.serviceWorker.ready.then(reg=>reg.showNotification(title, payload))
+        .catch(()=>{ try{ new Notification(title, payload); }catch(e){} });
+    } else {
+      new Notification(title, payload);
+    }
+  }catch(err){ console.error('Falha ao mostrar notificação do Pomodoro', err); }
+}
+
 function formatTime(s){ const m=Math.floor(s/60), sec=s%60; return String(m).padStart(2,'0')+':'+String(sec).padStart(2,'0'); }
 
 function updatePomoDisplay(){
@@ -7113,6 +7239,11 @@ logPomodoroSession({
   playSound(finishedPhase === 'work' ? 'pomo_work_end' : 'pomo_break_end');
 
   advancePomoPhase();
+
+  notifyPomoPhase(
+    pomoPhase === 'work' ? '⏳ Hora de focar!' : (pomoPhase === 'longbreak' ? '🌿 Pausa longa!' : '☕ Pausa!'),
+    pomoPhase === 'work' ? 'Sua pausa acabou — bora voltar ao foco.' : 'Seu ciclo de foco terminou — hora de descansar um pouco.'
+  );
 
 updatePomoDisplay();
 
