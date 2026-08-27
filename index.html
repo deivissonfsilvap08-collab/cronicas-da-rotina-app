@@ -7444,6 +7444,12 @@ async function replaceAllWithImported(parsed){
   state = migrateState(Object.assign(defaultState(), parsed));
   if(!state.achievementDefs || !state.achievementDefs.length) state.achievementDefs = buildDefaultAchievements();
   renderAll(); persistNow();
+  // CORRIGIDO — faltava isto: importar um backup nunca reavaliava quais conquistas
+  // deveriam estar desbloqueadas com base no histórico trazido (completionLog, projetos
+  // concluídos, etc.). Elas ficavam com a barra de progresso certa mas "travadas" — só
+  // desbloqueavam de verdade se algo MAIS tarde disparasse checkAchievements() por outro
+  // caminho (ex.: editar e salvar a conquista manualmente).
+  safeInit(checkAchievements, 'conquistas (após importar backup)');
   // O backup importado pode trazer sons personalizados (parsed.sounds) — sem isso eles
   // ficavam só na memória desta sessão e sumiam ao recarregar a página, já que sons não
   // fazem parte do que persistNow() salva (ver persistSound/persistAllSounds).
@@ -7488,6 +7494,7 @@ async function mergeImportedState(parsed){
     }
   }
   renderAll(); persistNow();
+  safeInit(checkAchievements, 'conquistas (após mesclar backup)');
   showNotif({icon:'🔀', title:'Dados mesclados', sub:'Itens novos do arquivo foram somados aos seus dados atuais (seu XP e nível não foram alterados)'+(restoredSounds?' — '+restoredSounds+' som(ns) restaurado(s)':'')});
 }
 
