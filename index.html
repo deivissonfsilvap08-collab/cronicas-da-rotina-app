@@ -2989,6 +2989,15 @@ async function pullCloudStateAndMerge(){
   }
 }
 
+// Se várias atualizações chegarem em sequência rápida (ex.: dois aparelhos com dados
+// "desencontrados" se realinhando, ou vários passos de uma limpeza automática disparando
+// em cadeia), agrupa tudo numa só aplicação em vez de reagir a cada uma na hora — sem
+// isso, a tela ficava redesenhando e mostrando avisos repetidos rapidamente, dando a
+// impressão de "tudo mudando/duplicando" por alguns segundos até estabilizar.
+let realtimeApplyTimer = null;
+let realtimeLatestPayload = null;
+const REALTIME_DEBOUNCE_MS = 900;
+
 function subscribeCloudRealtime(){
   if(!sb || !cloudUserId) return;
   try{
@@ -2998,15 +3007,22 @@ function subscribeCloudRealtime(){
         try{
           const incoming = payload.new && payload.new.data;
           if(!incoming) return;
-          const incomingUpdatedAt = incoming.updatedAt || 0;
-          const localUpdatedAt = state.updatedAt || 0;
-          // Se for igual ou mais velho que o que já temos, é só o eco do que ESTE aparelho
-          // acabou de enviar — ignora, senão entra num vaivém sem necessidade.
-          if(incomingUpdatedAt <= localUpdatedAt) return;
-          const changed = applyRemoteState(incoming); // mescla (ver mergeCloudState) — nunca substitui o estado local
-          if(changed) showNotif({icon:'☁', title:'Atualizado em tempo real', sub:'O outro aparelho mudou algo agora.'});
-          // Se a mesclagem trouxe algo que só existia aqui localmente também, propaga de volta.
-          if(changed) scheduleCloudPush();
+          realtimeLatestPayload = incoming; // sempre guarda só a versão mais recente recebida
+          clearTimeout(realtimeApplyTimer);
+          realtimeApplyTimer = setTimeout(()=>{
+            const toApply = realtimeLatestPayload;
+            realtimeLatestPayload = null;
+            if(!toApply) return;
+            const incomingUpdatedAt = toApply.updatedAt || 0;
+            const localUpdatedAt = state.updatedAt || 0;
+            // Se for igual ou mais velho que o que já temos, é só o eco do que ESTE
+            // aparelho acabou de enviar — ignora, senão entra num vaivém sem necessidade.
+            if(incomingUpdatedAt <= localUpdatedAt) return;
+            const changed = applyRemoteState(toApply); // mescla — nunca substitui o estado local
+            if(changed) showNotif({icon:'☁', title:'Atualizado em tempo real', sub:'O outro aparelho mudou algo agora.'});
+            // Se a mesclagem trouxe algo que só existia aqui localmente também, propaga de volta.
+            if(changed) scheduleCloudPush();
+          }, REALTIME_DEBOUNCE_MS);
         }catch(err){ console.error('Falha ao processar atualização em tempo real da nuvem', err); }
       })
       .subscribe();
