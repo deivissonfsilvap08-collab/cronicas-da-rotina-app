@@ -2802,9 +2802,33 @@ function mergeCloudState(localState, remoteState){
 // na tela) não faz sentido avisar "outro aparelho mudou algo agora" toda hora. Só notifica
 // quando missões, projetos, conquistas, metas, emblemas, logs ou configurações mudaram de
 // verdade.
+//
+// CORRIGIDO — bug sério: JSON.stringify(objeto) NÃO garante a mesma ordem de chaves pra
+// dois objetos com o MESMO conteúdo se eles foram CONSTRUÍDOS de jeitos diferentes (aqui,
+// "antes" vinha do estado carregado normalmente, e "depois" vinha de mergeCloudState, que
+// reconstrói o objeto via Object.assign(defaultState(), ...) — ordem de chaves diferente).
+// Isso fazia essa comparação achar "mudou algo" o tempo todo, MESMO quando nada mudou de
+// verdade — e cada "mudou" disparava reenvio pra nuvem (pushCloudStateNow), que por sua vez
+// alimentava outro ciclo de puxar/mesclar/reenviar. Antes isso só rodava quando alguém
+// mexia em algo; depois que passamos a checar a nuvem sozinha a cada ~25s e ao voltar pro
+// app, esse falso positivo virou um ciclo interminável de re-renderizar tudo sem parar —
+// o consumo de memória que travou o navegador. stableStringify ordena as chaves recursivamente,
+// então dois objetos com o MESMO conteúdo sempre viram a MESMA string, não importa a ordem
+// em que foram montados.
+function stableStringify(obj){
+  const seen = new WeakSet();
+  function sortKeys(value){
+    if(value === null || typeof value !== 'object') return value;
+    if(seen.has(value)) return null; // proteção extra contra referência circular
+    seen.add(value);
+    if(Array.isArray(value)) return value.map(sortKeys);
+    return Object.keys(value).sort().reduce((acc,k)=>{ acc[k] = sortKeys(value[k]); return acc; }, {});
+  }
+  return JSON.stringify(sortKeys(obj));
+}
 function meaningfulStateSignature(s){
   try{
-    return JSON.stringify({
+    return stableStringify({
       quests:s.quests, projects:s.projects, achievementDefs:s.achievementDefs, goals:s.goals,
       badges:s.badges, completionLog:s.completionLog, pomodoroLog:s.pomodoroLog, unlocked:s.unlocked,
       pomodoroSettings:s.pomodoroSettings, counters:s.counters, player:s.player
@@ -2880,6 +2904,31 @@ function cloudPushCircuitAllows(){
   return true;
 }
 
+// A mesma ideia, só que pro lado de PUXAR — antes só o envio tinha esse freio. Sem isso, se
+// alguma coisa disparasse pullCloudStateAndMerge() repetidamente (as duas novas checagens
+// automáticas — a cada ~25s e ao voltar pro app — mais uma possível falha na detecção de
+// "mudou algo", ver o comentário de stableStringify acima), nada impedia isso de virar um
+// ciclo sem fim de puxar → mesclar → re-renderizar tudo, consumindo memória até travar.
+const CLOUD_PULL_CIRCUIT_LIMIT = 6;
+const CLOUD_PULL_CIRCUIT_WINDOW_MS = 10000;
+const CLOUD_PULL_CIRCUIT_COOLDOWN_MS = 30000;
+let cloudPullTimestamps = [];
+let cloudPullCircuitOpenUntil = 0;
+let pullInProgress = false; // nunca deixa duas chamadas rodarem ao mesmo tempo, sobrepostas
+function cloudPullCircuitAllows(){
+  const now = Date.now();
+  if(now < cloudPullCircuitOpenUntil) return false;
+  cloudPullTimestamps = cloudPullTimestamps.filter(t => now - t < CLOUD_PULL_CIRCUIT_WINDOW_MS);
+  if(cloudPullTimestamps.length >= CLOUD_PULL_CIRCUIT_LIMIT){
+    cloudPullCircuitOpenUntil = now + CLOUD_PULL_CIRCUIT_COOLDOWN_MS;
+    console.error('Disjuntor de verificação da nuvem acionado: muitas verificações em pouco tempo. Pausando por '+(CLOUD_PULL_CIRCUIT_COOLDOWN_MS/1000)+'s.');
+    setCloudIndicator('☁ pausado (muita atividade) — retomando em instantes');
+    return false;
+  }
+  cloudPullTimestamps.push(now);
+  return true;
+}
+
 function scheduleCloudPush(){
   if(!sb || !cloudUserId || applyingRemote) return;
   clearTimeout(cloudPushTimer);
@@ -2888,6 +2937,10 @@ function scheduleCloudPush(){
 
 async function pullCloudStateAndMerge(){
   if(!sb || !cloudUserId) return;
+  if(pullInProgress) return; // já tem uma verificação rodando — não empilha outra por cima
+  if(!cloudPullCircuitAllows()) return;
+  pullInProgress = true;
+  try{
   setCloudIndicator('☁ verificando...');
   // CORRIGIDO — esta função não tinha NENHUM try/catch: se a chamada travasse ou desse
   // qualquer erro fora do padrão esperado, ela parava no meio pra sempre, sem devolver o
@@ -2924,6 +2977,9 @@ async function pullCloudStateAndMerge(){
   // mudança nenhuma, alimentava idas e vindas desnecessárias entre os aparelhos.
   if(changed) await pushCloudStateNow();
   else setCloudIndicator('☁ sincronizado');
+  }finally{
+    pullInProgress = false;
+  }
 }
 
 function subscribeCloudRealtime(){
