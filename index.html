@@ -2859,7 +2859,7 @@ function applyRemoteState(remoteData){
     // Se um aparelho ainda não atualizado trouxe de volta metas/troféus duplicados de um
     // bug já corrigido, limpa de novo aqui — ver o comentário completo em
     // dedupeAutoGoalsAndReverseXP().
-    safeInit(()=>{ if(dedupeAutoGoalsAndReverseXP()) persistNow(); }, 'limpeza de metas duplicadas (após sincronizar)');
+    safeInit(()=>{ if(dedupeAutoGoalsAndReverseXP()){ persistNow(); renderAll(); } }, 'limpeza de metas duplicadas (após sincronizar)');
   } finally {
     applyingRemote = false;
   }
