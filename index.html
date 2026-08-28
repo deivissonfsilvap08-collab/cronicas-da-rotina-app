@@ -2856,6 +2856,10 @@ function applyRemoteState(remoteData){
     // pra não interromper/reiniciar o intervalo que já está rodando corretamente na tela.
     if(!wasRunningLocally) safeInit(restorePomodoroFromState, 'pomodoro (após sincronizar)');
     safeInit(checkAchievements, 'conquistas (após sincronizar)');
+    // Se um aparelho ainda não atualizado trouxe de volta metas/troféus duplicados de um
+    // bug já corrigido, limpa de novo aqui — ver o comentário completo em
+    // dedupeAutoGoalsAndReverseXP().
+    safeInit(()=>{ if(dedupeAutoGoalsAndReverseXP()) persistNow(); }, 'limpeza de metas duplicadas (após sincronizar)');
   } finally {
     applyingRemote = false;
   }
@@ -6136,17 +6140,26 @@ function autoGenerateGoals(){
   state.quests.filter(q=>!q.done && q.type!=='habit').forEach(q=>{ catCounts[q.category] = (catCounts[q.category]||0) + 1; });
   Object.entries(catCounts).forEach(([cat, pendingCount])=>{
     if(pendingCount < 3) return;
+    const weeklyId = 'auto_cat_' + cat + '_' + getWeekStartDateStr();
+    // CORRIGIDO — bug grave: antes só conferia se havia uma meta ATIVA pra essa categoria
+    // nesta semana (`hasActive`). Assim que ela completava — o que podia ser praticamente
+    // instantâneo, já que calculateGoalProgress conta TODO o histórico, não só desde a
+    // criação desta meta — a trava sumia (não tinha mais nenhuma "ativa"), e uma meta NOVA
+    // com o MESMO id era recriada, completava na hora de novo, dava troféu + XP de novo, e
+    // repetia — a cada ciclo de checkGoalsProgress (a cada 60s), sem parar, enquanto o app
+    // ficasse aberto (foi isso que gerou milhares de troféus "Semana de Saúde" duplicados e
+    // travou o navegador por consumo de memória). Agora verifica se JÁ EXISTE uma meta com
+    // esse id específico — não importa o status — antes de criar outra: uma por categoria,
+    // por semana, ponto final.
+    if(state.goals.some(g=>g.id===weeklyId)) return;
     const hasActive = state.goals.some(g=>g.type==='category' && g.category===cat && g.status==='active');
     if(hasActive) return;
     const target = Math.max(3, Math.min(pendingCount, 10));
     const d = new Date(); d.setDate(d.getDate()+7);
     const catInfo = CATEGORIES[cat] || CATEGORIES.geral;
     const icon = suggestIcon(catInfo.label + ' meta desafio semanal', cat);
-    // Mesma lógica de ID determinístico aqui: baseado na segunda-feira da semana atual,
-    // não sorteado — dois aparelhos gerando "a meta desta semana" na mesma semana (mesmo
-    // que em dias diferentes dela) caem no mesmo ID, evitando duplicata pós-sincronização.
     const goal = {
-      id: 'auto_cat_' + cat + '_' + getWeekStartDateStr(), title: `Semana de ${catInfo.label}: complete ${target} missões`,
+      id: weeklyId, title: `Semana de ${catInfo.label}: complete ${target} missões`,
       desc: `Meta automática baseada nas suas missões pendentes de ${catInfo.label}.`,
       category: cat, type: 'category', targetValue: target,
       startDate: today, deadline: getLocalDateStr(d), bonusXP: 60,
@@ -6157,6 +6170,71 @@ function autoGenerateGoals(){
   });
 
   persistNow();
+}
+
+// ===== LIMPEZA do estrago causado pelo bug acima (metas semanais duplicadas) =====
+// Remove as cópias duplicadas de metas automáticas (mantém só a mais antiga de cada),
+// remove os troféus fraudulentos correspondentes, e devolve o XP/nível ao que seria sem o
+// bug — recalculando o total de XP acumulado e reconstruindo nível/XP a partir dele.
+// NATURALMENTE SEGURA DE CHAMAR QUANTAS VEZES QUISER: ela só age quando realmente encontra
+// duplicatas (idCounts[id] > 1); depois da primeira limpeza, não sobra nada pra encontrar,
+// então chamadas seguintes não fazem nada. Por isso é chamada tanto na inicialização quanto
+// depois de toda sincronização com a nuvem — se um aparelho diferente (ainda com dados
+// antigos) trouxer duplicatas de volta numa mesclagem, elas são limpas de novo na hora.
+function dedupeAutoGoalsAndReverseXP(){
+  const idCounts = {};
+  (state.goals||[]).forEach(g=>{ if(g && g.id!=null) idCounts[g.id] = (idCounts[g.id]||0)+1; });
+  const duplicateIds = new Set(Object.keys(idCounts).filter(id =>
+    idCounts[id] > 1 && (id.startsWith('auto_cat_') || id.startsWith('auto_habit_daily_'))
+  ));
+  if(duplicateIds.size === 0) return false; // nada duplicado agora — nada a fazer
+
+  // Percorre do mais ANTIGO pro mais NOVO (unshift bota as novas na frente, então o mais
+  // antigo está no fim do array) — mantém só a primeira (mais antiga) cópia de cada id
+  // duplicado, descarta as demais.
+  const keepFirstGoalSeen = {};
+  const newGoals = [];
+  for(let i = state.goals.length - 1; i >= 0; i--){
+    const g = state.goals[i];
+    if(g && duplicateIds.has(g.id)){
+      if(keepFirstGoalSeen[g.id]) continue;
+      keepFirstGoalSeen[g.id] = true;
+    }
+    newGoals.unshift(g);
+  }
+  state.goals = newGoals;
+
+  // Mesma lógica pros troféus (badges): mantém só o mais antigo por goalId duplicado, soma
+  // o XP de bônus de todos os removidos pra descontar do jogador a seguir.
+  let xpToReverse = 0;
+  const keepFirstBadgeSeen = {};
+  const newBadges = [];
+  for(let i = state.badges.length - 1; i >= 0; i--){
+    const b = state.badges[i];
+    if(b && duplicateIds.has(b.goalId)){
+      if(keepFirstBadgeSeen[b.goalId]){ xpToReverse += (b.bonusXP||0); continue; }
+      keepFirstBadgeSeen[b.goalId] = true;
+    }
+    newBadges.unshift(b);
+  }
+  state.badges = newBadges;
+
+  // Reconstrói nível/XP do zero a partir do total acumulado, descontando o que foi ganho
+  // indevidamente — assim o resultado bate exatamente com o que seria sem o bug, em vez de
+  // só "chutar" um nível novo.
+  if(xpToReverse > 0){
+    let totalXP = state.player.xp || 0;
+    for(let lvl=1; lvl<(state.player.level||1); lvl++) totalXP += xpForLevel(lvl);
+    totalXP = Math.max(0, totalXP - xpToReverse);
+    let level = 1, xp = totalXP;
+    while(xp >= xpForLevel(level)){ xp -= xpForLevel(level); level++; }
+    state.player.level = level;
+    state.player.xp = xp;
+    state.player.xpToNext = xpForLevel(level);
+  }
+
+  console.warn('[Limpeza automática] Removidas metas/troféus duplicados de um bug já corrigido; '+xpToReverse+' XP indevidos revertidos.');
+  return true;
 }
 
 document.getElementById('btn-criar-meta').addEventListener('click', ()=>{
@@ -8115,6 +8193,15 @@ function safeInit(fn, label){
 
 safeInit(initFloatingNav, 'menu flutuante');
 safeInit(restorePomodoroFromState, 'pomodoro');
+safeInit(()=>{
+  // Limpeza única do estrago de um bug já corrigido (metas semanais duplicadas se
+  // regenerando sozinhas). Roda ANTES do primeiro renderAll pra já mostrar os números
+  // certos na tela, sem a pessoa ver o estado inflado nem por um instante.
+  if(dedupeAutoGoalsAndReverseXP()){
+    persistNow();
+    showNotif({icon:'🧹', title:'Limpeza automática', sub:'Removemos metas/troféus duplicados de um bug já corrigido e ajustamos seu XP e nível de volta ao correto.'});
+  }
+}, 'limpeza de metas duplicadas (bug corrigido)');
 safeInit(renderAll, 'renderAll');
 safeInit(initHeroTierGalleryDrag, 'arrastar galeria de evolução do herói');
 safeInit(renderBatchSecondaryCatCheckboxes, 'categorias secundárias em lote');
