@@ -6182,11 +6182,30 @@ function autoGenerateGoals(){
 // depois de toda sincronização com a nuvem — se um aparelho diferente (ainda com dados
 // antigos) trouxer duplicatas de volta numa mesclagem, elas são limpas de novo na hora.
 function dedupeAutoGoalsAndReverseXP(){
-  const idCounts = {};
-  (state.goals||[]).forEach(g=>{ if(g && g.id!=null) idCounts[g.id] = (idCounts[g.id]||0)+1; });
-  const duplicateIds = new Set(Object.keys(idCounts).filter(id =>
-    idCounts[id] > 1 && (id.startsWith('auto_cat_') || id.startsWith('auto_habit_daily_'))
-  ));
+  // Sinal 1: metas com o mesmo id repetido dentro do PRÓPRIO array de metas — acontece se
+  // esta limpeza rodar direto sobre o estado local bruto, ANTES de qualquer mesclagem com
+  // a nuvem.
+  const goalIdCounts = {};
+  (state.goals||[]).forEach(g=>{ if(g && g.id!=null) goalIdCounts[g.id] = (goalIdCounts[g.id]||0)+1; });
+  const dupFromGoals = Object.keys(goalIdCounts).filter(id =>
+    goalIdCounts[id] > 1 && (id.startsWith('auto_cat_') || id.startsWith('auto_habit_daily_'))
+  );
+
+  // Sinal 2 — CORRIGIDO: o que realmente estava acontecendo no caso real. A mesclagem com
+  // a nuvem (mergeCloudState → mergeById) já colapsa metas de mesmo id sozinha, por usar um
+  // Map por baixo dos panos — então, no momento em que este código roda (depois da
+  // mesclagem), `state.goals` já pode estar com só 1 cópia, e o Sinal 1 sozinho não acha
+  // nada. Só que os TROFÉUS (badges) têm um id PRÓPRIO e único cada um — a mesclagem NÃO os
+  // colapsa, e ficam todos lá, aos milhares, mesmo com a meta já "limpa" por baixo. Por isso
+  // detectamos duplicata TAMBÉM pelo goalId repetido nos troféus, não só pelo id da meta —
+  // sem isso, a limpeza concluía "nada a fazer" e os troféus fraudulentos nunca eram tocados.
+  const badgeGoalIdCounts = {};
+  (state.badges||[]).forEach(b=>{ if(b && b.goalId!=null) badgeGoalIdCounts[b.goalId] = (badgeGoalIdCounts[b.goalId]||0)+1; });
+  const dupFromBadges = Object.keys(badgeGoalIdCounts).filter(goalId =>
+    badgeGoalIdCounts[goalId] > 1 && (goalId.startsWith('auto_cat_') || goalId.startsWith('auto_habit_daily_'))
+  );
+
+  const duplicateIds = new Set([...dupFromGoals, ...dupFromBadges]);
   if(duplicateIds.size === 0) return false; // nada duplicado agora — nada a fazer
 
   // Percorre do mais ANTIGO pro mais NOVO (unshift bota as novas na frente, então o mais
