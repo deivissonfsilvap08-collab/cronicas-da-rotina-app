@@ -793,6 +793,7 @@ prazo: 25/08/2026</div>
       <button data-gf="completed">Concluídas <span class="qcount" id="gcount-completed">0</span></button>
       <button data-gf="expired">Expiradas <span class="qcount" id="gcount-expired">0</span></button>
     </div>
+    <input type="text" id="goal-search" placeholder="🔍 Buscar meta pelo título..." style="margin-bottom:12px; width:100%;">
     <div id="goal-list"></div>
   </div>
 </section>
@@ -973,6 +974,7 @@ prazo: 25/08/2026</div>
   <button id="btn-ach-from-quests" class="btn">🔍 Criar a partir de missões</button>
     </div>
 <button id="btn-ach-bulk-mode" class="btn">☑️ Selecionar várias</button>
+<input type="text" id="ach-search" placeholder="🔍 Buscar conquista pelo título..." style="margin-bottom:16px; width:100%;">
 <div class="stat-row" id="ach-summary-stats" style="margin-bottom:16px;">
 <span>🏆 Desbloqueadas: <b id="ach-stat-unlocked">0</b> / <b id="ach-stat-total">0</b></span>
 <span>📊 Progresso: <b id="ach-stat-pct">0%</b></span>
@@ -2860,6 +2862,7 @@ function applyRemoteState(remoteData){
     // bug já corrigido, limpa de novo aqui — ver o comentário completo em
     // dedupeAutoGoalsAndReverseXP().
     safeInit(()=>{ if(dedupeAutoGoalsAndReverseXP()){ persistNow(); renderAll(); } }, 'limpeza de metas duplicadas (após sincronizar)');
+    safeInit(()=>{ if(dedupeAchievementDefs()){ persistNow(); renderAll(); } }, 'limpeza de conquistas duplicadas (após sincronizar)');
   } finally {
     applyingRemote = false;
   }
@@ -3485,6 +3488,68 @@ function unlockAutoAchievement(id){
   unlockAchievement(def); // agora dispara o popup de festa também
 }
 
+// "Impressão digital" do que uma conquista REALMENTE significa, ignorando o id (que pode
+// variar por causa de esquemas de nomenclatura diferentes usados ao longo do tempo, e foi
+// exatamente isso que deixou 6 conquistas duplicadas passarem batido: "cat_criatividade_5"
+// vs "seccat_criatividade_5" são textos de id diferentes, mas a MESMA conquista). Projeto e
+// meta se identificam só pelo projeto/meta que representam — não importa qual mecanismo
+// interno foi usado pra implementar (condição "manual" com desbloqueio direto, ou uma
+// condição dedicada tipo "project_complete"), aos olhos de quem usa o app são a mesma
+// coisa. Nível de atributo se identifica só por atributo+nível. Todo o resto (categoria,
+// tipo, horas, sequência, palavra-chave) se identifica pelo tipo de condição + valor +
+// categoria/qtype/palavras-chave.
+function achievementSemanticKey(def){
+  if(def.projectId) return 'project::' + def.projectId;
+  if(def.goalId) return 'goal::' + def.goalId;
+  if(def.attrKey && def.attrLevel) return 'attr::' + def.attrKey + '::' + def.attrLevel;
+  // Conquista manual sem nenhum campo que a identifique (projeto/meta/atributo) — não tem
+  // como saber com segurança se duas assim são "a mesma coisa" ou coincidência. Nesses
+  // casos, retorna null: melhor NUNCA comparar (e nunca arriscar apagar algo único por
+  // engano) do que arriscar um falso positivo.
+  if(def.conditionType === 'manual') return null;
+  const parts = [def.conditionType, def.value];
+  if(def.category) parts.push('cat:'+def.category);
+  if(def.qtype) parts.push('qtype:'+def.qtype);
+  if(def.keywords && def.keywords.length) parts.push('kw:'+[...def.keywords].map(k=>normalizeText(k)).sort().join('|'));
+  return parts.join('::');
+}
+
+// ===== LIMPEZA das duplicatas que já existem (mesmo significado, ids diferentes — geradas
+// por esquemas de nomenclatura antigos, antes desta blindagem existir) =====
+// Agrupa por achievementSemanticKey(); em cada grupo com mais de uma, mantém UMA só —
+// dando preferência pra manter a que já estiver DESBLOQUEADA (nunca perde uma conquista já
+// ganha) e, se mais de uma estiver desbloqueada ou nenhuma, mantém a mais ANTIGA. Se a
+// removida estava desbloqueada e a mantida não, transfere o desbloqueio, pra nunca
+// "destrancar" de volta uma conquista que você já tinha.
+// NATURALMENTE SEGURA DE CHAMAR QUANTAS VEZES QUISER: só age quando encontra grupos
+// realmente duplicados; depois da primeira limpeza não sobra nada pra encontrar.
+function dedupeAchievementDefs(){
+  const groups = {};
+  state.achievementDefs.forEach(d=>{
+    const key = achievementSemanticKey(d);
+    if(!key) return; // sem impressão digital confiável — nunca agrupa
+    (groups[key] = groups[key] || []).push(d);
+  });
+  const idsToRemove = new Set();
+  let foundDuplicates = false;
+  Object.values(groups).forEach(list=>{
+    if(list.length <= 1) return;
+    foundDuplicates = true;
+    const unlockedOnes = list.filter(d => state.unlocked[d.id]);
+    const keep = unlockedOnes[0] || list.slice().sort((a,b)=>(a.createdAt||0)-(b.createdAt||0))[0];
+    list.forEach(d=>{
+      if(d.id === keep.id) return;
+      idsToRemove.add(d.id);
+      if(state.unlocked[d.id] && !state.unlocked[keep.id]) state.unlocked[keep.id] = state.unlocked[d.id];
+      delete state.unlocked[d.id];
+    });
+  });
+  if(!foundDuplicates) return false;
+  state.achievementDefs = state.achievementDefs.filter(d => !idsToRemove.has(d.id));
+  console.warn('[Limpeza de conquistas] Removidas '+idsToRemove.size+' conquistas duplicadas (mesmo significado, ids diferentes).');
+  return true;
+}
+
 function autoGenerateAchievements() {
   if (!state._autoGenerated) state._autoGenerated = [];
   const patterns = new Set(state._autoGenerated);
@@ -3492,6 +3557,14 @@ function autoGenerateAchievements() {
   function createAutoAchievement(id, title, desc, conditionType, value, extra = {}) {
     if (patterns.has(id)) return false;
     if (state.achievementDefs.some(d => d.id === id)) { patterns.add(id); return false; }
+    // BLINDAGEM CONTRA DUPLICATAS DE VERDADE — antes só checava se o ID (o texto) já
+    // existia. Isso não pegava conquistas que representam a MESMA coisa mas nasceram com
+    // esquemas de nomenclatura diferentes (ex.: geradas numa versão antiga do app vs
+    // agora). Agora compara pelo SIGNIFICADO real (ver achievementSemanticKey) — não
+    // importa o texto do id, se já existe uma conquista fazendo a mesma coisa, não cria
+    // outra.
+    const candidateKey = achievementSemanticKey({ conditionType, value, ...extra });
+    if(candidateKey && state.achievementDefs.some(d => achievementSemanticKey(d) === candidateKey)){ patterns.add(id); return false; }
     const icon = suggestIcon(title + ' ' + desc, extra.category || 'geral');
     state.achievementDefs.push({ id, title, desc, icon, type:'auto', conditionType, value, ...extra, autoGenerated:true, createdAt: Date.now() });
     patterns.add(id);
@@ -3521,7 +3594,7 @@ function autoGenerateAchievements() {
     [3,5,8,12,18].forEach(lvl => {
       if (attr.level >= lvl) {
         const id = `auto_attr_${key}_${lvl}`;
-        createAutoAchievement(id, `${attrNames[key]} Nível ${lvl}`, `Atinja o nível ${lvl} em ${attrNames[key]}`, 'manual', 1);
+        createAutoAchievement(id, `${attrNames[key]} Nível ${lvl}`, `Atinja o nível ${lvl} em ${attrNames[key]}`, 'manual', 1, { attrKey: key, attrLevel: lvl });
         unlockAutoAchievement(id);
       }
     });
@@ -3532,7 +3605,7 @@ function autoGenerateAchievements() {
     const pq = state.quests.filter(q => q.projectId === proj.id);
     if (pq.length > 0 && pq.every(q => q.done)) {
       const id = `auto_project_${proj.id}`;
-      createAutoAchievement(id, `Projeto Concluído: ${proj.title}`, `Finalize todas as missões do projeto "${proj.title}"`, 'manual', 1);
+      createAutoAchievement(id, `Projeto Concluído: ${proj.title}`, `Finalize todas as missões do projeto "${proj.title}"`, 'manual', 1, { projectId: proj.id });
       unlockAutoAchievement(id);
     }
   });
@@ -3541,7 +3614,7 @@ function autoGenerateAchievements() {
   state.goals.forEach(goal => {
     if (goal.status === 'completed') {
       const id = `auto_goal_${goal.id}`;
-      createAutoAchievement(id, `Meta: ${goal.title}`, `Complete a meta "${goal.title}"`, 'manual', 1);
+      createAutoAchievement(id, `Meta: ${goal.title}`, `Complete a meta "${goal.title}"`, 'manual', 1, { goalId: goal.id });
       unlockAutoAchievement(id);
     }
   });
@@ -3958,8 +4031,14 @@ if(elUnlocked) elUnlocked.textContent = unlockedAchCount;
 
 if(elPct) elPct.textContent = pctAchCount + '%';
 
+  // Busca por título/descrição — os números do topo (Desbloqueadas/Progresso) continuam
+  // contando SEMPRE o total real, mesmo filtrado, pra nunca parecer que sumiu conquista.
+  const achSearchTerm = normalizeText(currentAchSearch||'');
+  const visibleAchDefs = achSearchTerm
+    ? state.achievementDefs.filter(d => normalizeText((d.title||'')+' '+(d.desc||'')).includes(achSearchTerm))
+    : state.achievementDefs;
 
-  sortAchievements(state.achievementDefs).forEach(def => {
+  sortAchievements(visibleAchDefs).forEach(def => {
     const unlocked = !!state.unlocked[def.id];
     const prog = getAchProgress(def);
     const progHtml = (prog && !unlocked)
@@ -4485,6 +4564,18 @@ document.getElementById('quest-search').addEventListener('input', e=>{
   renderQuests();
 });
 
+let currentAchSearch = '';
+document.getElementById('ach-search').addEventListener('input', e=>{
+  currentAchSearch = e.target.value;
+  renderAchievements();
+});
+
+let currentGoalSearch = '';
+document.getElementById('goal-search').addEventListener('input', e=>{
+  currentGoalSearch = e.target.value;
+  renderGoals();
+});
+
 function sortQuestsList(list){
   const mode = safeLSGet('questSortMode') || 'new-first';
   const arr = [...list];
@@ -4905,7 +4996,7 @@ function guessAttrs(lower, category){
   if(/criativ|desenh|edit[aá]|v[ií]deo|m[uú]sica|arte|compor|pintar|escrever/.test(lower)) set.add('criatividade');
   if(/estudar|aprender|livro|pesquisa|curso/.test(lower)) set.add('mente');
   if(/treino|exerc[ií]cio|caminhada|academia/.test(lower)) set.add('corpo');
-  if(/resistir|v[ií]cio|evitar|parar de/.test(lower)) set.add('disciplina');
+  if(/resistir|v[ií]cio|evitar|parar de|disciplina|constância|consist[eê]ncia/.test(lower)) set.add('disciplina');
   if(/foco|trabalho|projeto|reuni[aã]o|c[oó]digo|programar/.test(lower)) set.add('foco');
   return Array.from(set);
 }
@@ -4983,8 +5074,21 @@ const STRUCTURED_TAG_PATTERNS = {
   dificuldade: /^(dificuldade|difficulty)\s*:\s*(.+)$/i,
   prazo: /^(prazo|deadline|data)\s*:\s*(.+)$/i,
   projeto: /^(projeto|project)\s*:\s*(.+)$/i,
-  repetir: /^(repetir|recorrente|di[aá]ria|h[aá]bito)\s*:\s*(.+)$/i
+  repetir: /^(repetir|recorrente|di[aá]ria|h[aá]bito)\s*:\s*(.+)$/i,
+  atributos: /^(atributos?|attrs?|attributes?)\s*:\s*(.+)$/i
 };
+
+// "Atributos: Foco, Disciplina, Criatividade" → ['foco','disciplina','criatividade']. Aceita
+// vírgula, "e", ou barra como separador, e casa cada nome (com ou sem acento) pro valor
+// interno certo — sem isso, a tag explícita não tinha como virar uma lista de verdade.
+function mapAttrWords(value){
+  const ATTR_NAME_TO_KEY = { foco:'foco', disciplina:'disciplina', corpo:'corpo', mente:'mente', criatividade:'criatividade' };
+  return value.split(/[,/]|(?:\s+e\s+)/i)
+    .map(w => normalizeText(w.trim()))
+    .filter(Boolean)
+    .map(w => ATTR_NAME_TO_KEY[w])
+    .filter(Boolean);
+}
 
 function mapTypeWord(w){
   const n = normalizeText(w);
@@ -5003,15 +5107,36 @@ function mapDifficultyWord(w){
 }
 function mapCategoryWord(w){
   const n = normalizeText(w);
+  if(!n) return null;
+  // Prioridade 1: bate exatamente com a chave interna ou o rótulo inteiro. Sem isso,
+  // nomes curtos podiam "sumir" dentro de rótulos maiores que continham as mesmas letras
+  // por acaso (ver o comentário completo em mapSecondaryCatWords, onde isso realmente
+  // aconteceu: "IA" virava "Criatividade").
   for(const [key, info] of Object.entries(CATEGORIES)){
-    if(normalizeText(key)===n || normalizeText(info.label).includes(n) || n.includes(normalizeText(info.label))) return key;
+    if(normalizeText(key)===n || normalizeText(info.label)===n) return key;
+  }
+  // Prioridade 2 (fallback): correspondência parcial, só usada quando não há bate exato.
+  for(const [key, info] of Object.entries(CATEGORIES)){
+    if(normalizeText(info.label).includes(n) || n.includes(normalizeText(info.label))) return key;
   }
   return null;
 }
 function mapSecondaryCatWords(w){
   return w.split(',').map(s=>s.trim()).filter(Boolean).map(s=>{
     const n = normalizeText(s);
-    const found = Object.entries(SECONDARY_CATEGORIES).find(([key,info])=> normalizeText(key)===n || normalizeText(info.label).includes(n) || n.includes(normalizeText(info.label)));
+    if(!n) return null;
+    // CORRIGIDO — bug real: "IA" virava "Criatividade" sozinho, porque o comparador usava
+    // "contém" (substring), e as letras "ia" aparecem DENTRO de "criatividade" (cr-IA-
+    // tividade) — como "criatividade" vem antes de "ia" na lista interna de categorias,
+    // ele "roubava" a combinação antes do nome certo ser considerado. Agora primeiro
+    // procura um bate EXATO (chave ou rótulo inteiro) em todas as categorias; só cai pro
+    // "contém" solto (fallback) se nada bater exatamente — assim nomes curtos como "IA",
+    // "SEO" nunca mais perdem pra um rótulo mais longo que só por acaso contém as mesmas
+    // letras.
+    let found = Object.entries(SECONDARY_CATEGORIES).find(([key,info]) => normalizeText(key)===n || normalizeText(info.label)===n);
+    if(!found){
+      found = Object.entries(SECONDARY_CATEGORIES).find(([key,info]) => normalizeText(info.label).includes(n) || n.includes(normalizeText(info.label)));
+    }
     return found ? found[0] : null;
   }).filter(Boolean);
 }
@@ -5098,6 +5223,7 @@ function extractStructuredTags(lines){
         else if(key==='prazo'){ const v=mapDateWord(value); if(v) overrides.deadline=v; }
         else if(key==='projeto'){ const v=mapProjectWord(value); if(v) overrides.projectId=v; }
         else if(key==='repetir'){ const v=mapRecurringWord(value); if(v!==null) overrides.recurring=v; }
+        else if(key==='atributos'){ const v=mapAttrWords(value); if(v.length) overrides.attrs=v; }
         break;
       }
     }
@@ -5167,13 +5293,12 @@ return blocks.map(b=>{
     if(autoProjectId) parsedFromText.projectId = autoProjectId;
 
     const merged = Object.assign(parsedFromText, overrides, { title: b.title, desc, _explicit: Object.keys(overrides) });
-    // BUG CORRIGIDO: os atributos (Foco/Disciplina/Corpo/Mente/Criatividade) eram
-    // calculados a partir da categoria ADIVINHADA no texto inteiro (parseQuickInput),
-    // ANTES de qualquer correção da categoria de verdade ser aplicada. Se o texto falava
-    // em "dormir"/"sono", a categoria adivinhada virava Saúde (→ atributo Corpo), e mesmo
-    // quando a categoria certa (Foco/Trabalho) sobrescrevia depois, o atributo continuava
-    // errado, porque nunca era recalculado. Agora recalcula usando a categoria FINAL.
-    merged.attrs = guessAttrs(fullText.toLowerCase(), merged.category);
+    // CORRIGIDO — quando você escreve "Atributos: Foco, Disciplina, Criatividade" no seu
+    // modelo, essa lista agora é reconhecida como tag explícita (ver STRUCTURED_TAG_PATTERNS
+    // + mapAttrWords) e respeitada aqui. Só cai no palpite automático (guessAttrs) quando
+    // você NÃO especifica atributos manualmente — antes disso, ela sempre sobrescrevia
+    // qualquer coisa que você tivesse escrito, mesmo que explícita.
+    merged.attrs = (overrides.attrs && overrides.attrs.length) ? overrides.attrs : guessAttrs(fullText.toLowerCase(), merged.category);
     return merged;
   });
 }
@@ -6427,8 +6552,16 @@ function renderGoals(){
   const list = document.getElementById('goal-list');
   if(!list) return;
   list.innerHTML = '';
-  const goals = state.goals.filter(g=>g.status===currentGoalFilter);
-  if(goals.length===0){ list.insertAdjacentHTML('beforeend','<p style="color:var(--muted)">Nenhuma meta aqui ainda.</p>'); }
+  const goalSearchTerm = normalizeText(currentGoalSearch||'');
+  const goals = state.goals.filter(g=>{
+    if(g.status!==currentGoalFilter) return false;
+    if(goalSearchTerm && !normalizeText((g.title||'')+' '+(g.desc||'')).includes(goalSearchTerm)) return false;
+    return true;
+  });
+  if(goals.length===0){
+    const msg = goalSearchTerm ? 'Nenhuma meta encontrada pra essa busca.' : 'Nenhuma meta aqui ainda.';
+    list.insertAdjacentHTML('beforeend','<p style="color:var(--muted)">'+msg+'</p>');
+  }
   goals.forEach(goal=>{
     const div = document.createElement('div');
     div.className = 'quest type-goal';
@@ -8221,6 +8354,15 @@ safeInit(()=>{
     showNotif({icon:'🧹', title:'Limpeza automática', sub:'Removemos metas/troféus duplicados de um bug já corrigido e ajustamos seu XP e nível de volta ao correto.'});
   }
 }, 'limpeza de metas duplicadas (bug corrigido)');
+safeInit(()=>{
+  // Limpeza das conquistas duplicadas (mesmo significado, ids diferentes) que já existiam
+  // no seu catálogo — daqui pra frente, novas duplicatas nem chegam a ser criadas (ver
+  // achievementSemanticKey em createAutoAchievement).
+  if(dedupeAchievementDefs()){
+    persistNow();
+    showNotif({icon:'🧹', title:'Conquistas duplicadas removidas', sub:'Nada do que você já desbloqueou foi perdido.'});
+  }
+}, 'limpeza de conquistas duplicadas (bug corrigido)');
 safeInit(renderAll, 'renderAll');
 safeInit(initHeroTierGalleryDrag, 'arrastar galeria de evolução do herói');
 safeInit(renderBatchSecondaryCatCheckboxes, 'categorias secundárias em lote');
