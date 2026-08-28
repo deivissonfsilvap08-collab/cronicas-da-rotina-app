@@ -2738,14 +2738,22 @@ function mergePlayer(localP, remoteP){
 
 function mergePomodoroRuntime(localRt, remoteRt, localNewer){
   localRt = localRt || {}; remoteRt = remoteRt || {};
-  // Este é o ponto que fazia o relógio do Pomodoro "voltar"/pular quando os dois aparelhos
-  // estavam abertos ao mesmo tempo: antes, o pomodoroRuntime vinha junto com o "lado mais
-  // novo" do estado inteiro — então bastava você mexer em QUALQUER coisa no outro aparelho
-  // (criar missão, marcar hábito etc.) pra esse aparelho enviar seu próprio pomodoroRuntime
-  // (parado, ou de uma sessão diferente) e atropelar o cronômetro que estava rodando aqui,
-  // ao vivo, na tela. Agora: se ESTE aparelho está com um Pomodoro rodando neste momento,
-  // o runtime dele nunca é substituído por uma sincronização vinda de fora — só o que este
-  // aparelho mesmo salvar (start/pausa/pular/reiniciar) muda seu próprio cronômetro.
+  // CORRIGIDO — bug do "cabo de guerra" com dois aparelhos abertos ao mesmo tempo: antes,
+  // a regra era só "se eu estou rodando agora, ninguém me atropela". Isso protegia bem
+  // contra sincronizações incidentais, mas também bloqueava um comando de PROPÓSITO
+  // (pausar/reiniciar/pular) vindo do outro aparelho — assim que os dois espelhavam o
+  // mesmo cronômetro, cada um se achava "rodando" e rejeitava qualquer novidade, inclusive
+  // uma pausa de verdade; o outro aparelho reenviava seu "ainda rodando" e reativava o
+  // cronômetro que você tinha acabado de pausar, numa volta sem fim.
+  //
+  // Agora, a ação EXPLÍCITA mais recente (clicar em iniciar/pausar/pular/reiniciar, ou uma
+  // transição real de fase — ver savePomoRuntime) sempre decide, não importa qual aparelho
+  // "acha" que está rodando. Só cai no comportamento antigo (não interrompe quem está
+  // rodando aqui) como último recurso, quando nenhum dos dois lados tem uma ação explícita
+  // registrada pra comparar.
+  const localAction = localRt.lastActionAt || 0;
+  const remoteAction = remoteRt.lastActionAt || 0;
+  if(localAction || remoteAction) return remoteAction > localAction ? remoteRt : localRt;
   if(localRt.running) return localRt;
   return localNewer ? localRt : remoteRt;
 }
@@ -7551,7 +7559,7 @@ updatePomoDisplay();
 
 pomoPhaseStartedAt = Date.now();
 
-savePomoRuntime();
+savePomoRuntime(true);
 
 persistNow();
 
@@ -7566,7 +7574,7 @@ pomoInterval = setInterval(tickPomodoro, 1000);
 }
 
 
-function savePomoRuntime(){
+function savePomoRuntime(isExplicitAction){
 const rt = state.pomodoroRuntime || (state.pomodoroRuntime = {});
 rt.phase = pomoPhase;
 rt.cycleCount = pomoCycleCount;
@@ -7583,6 +7591,18 @@ rt.secondsLeft = null;
 rt.endsAt = null;
 rt.secondsLeft = pomoSeconds;
 }
+// CORRIGIDO — bug real de "cabo de guerra" com dois aparelhos: antes, a mesclagem só
+// perguntava "estou rodando agora?" pra decidir se aceitava uma atualização de fora. Isso
+// protegia bem contra sincronizações incidentais, MAS também bloqueava comandos de
+// PROPÓSITO (pausar/reiniciar/pular) vindos do outro aparelho — porque assim que os dois
+// aparelhos espelhavam o mesmo cronômetro, cada um se achava "rodando" e rejeitava
+// qualquer novidade, inclusive uma pausa de verdade. O outro aparelho então reenviava seu
+// "ainda rodando", reativando o cronômetro que você tinha acabado de pausar — dando a
+// volta sem fim que você viu. Agora, toda ação EXPLÍCITA (clicar em iniciar/pausar/pular/
+// reiniciar, ou uma transição real de fase) carimba lastActionAt — e é ESSE carimbo,
+// não o "estou rodando?", que decide quem manda no cronômetro na mesclagem (ver
+// mergePomodoroRuntime). A ação mais recente sempre vence, não importa qual aparelho.
+if(isExplicitAction) rt.lastActionAt = Date.now();
 }
 
 function restorePomodoroFromState(){
@@ -7631,7 +7651,7 @@ function restorePomodoroFromState(){
       showNotif({icon:'⏳', title:'Sessão concluída enquanto você estava fora', sub:'O ciclo anterior foi registrado automaticamente no seu histórico.'});
     }
     updatePomoDisplay();
-    savePomoRuntime();
+    savePomoRuntime(true);
     persistNow();
     return;
   }
@@ -7689,7 +7709,7 @@ pomoQuestIdAtPhaseStart = document.getElementById('pomo-quest-select').value || 
 // relógio permanece coerente mesmo depois de sair e voltar da aba/app.
 pomoPhaseStartedAt = Date.now() - (plannedNow - pomoSeconds) * 1000;
 pomoInterval = setInterval(tickPomodoro, 1000);
-savePomoRuntime();
+savePomoRuntime(true);
 persistNow();
 });
 
@@ -7721,7 +7741,7 @@ pomoQuestIdAtPhaseStart = newQuestId;
 document.getElementById('pomo-pause').addEventListener('click', ()=>{
   clearInterval(pomoInterval);
   pomoRunning = false;
-savePomoRuntime();
+savePomoRuntime(true);
 persistNow();
 });
 
@@ -7746,7 +7766,7 @@ pomoPhaseStartedAt = null;
 pomoSeconds = getPlannedSecondsForPhase('work');
 pomoPlannedSecondsCurrent = pomoSeconds;
 updatePomoDisplay();
-savePomoRuntime();
+savePomoRuntime(true);
 persistNow();
 });
 
@@ -7776,9 +7796,12 @@ const elapsedSeconds = plannedSeconds - pomoSeconds;
   if(wasRunning){
     pomoRunning = true;
     pomoInterval = setInterval(tickPomodoro, 1000);
-savePomoRuntime();
-persistNow();
   }
+  // CORRIGIDO — antes, só salvava/sincronizava o resultado do "pular ciclo" se o cronômetro
+  // estivesse rodando no momento do clique; pulando enquanto pausado, a mudança de fase
+  // ficava só na tela deste aparelho, sem persistir nem sincronizar.
+  savePomoRuntime(true);
+  persistNow();
 });
 
 function getPomodoroLogSummary(){
