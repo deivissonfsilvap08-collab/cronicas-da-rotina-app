@@ -6339,6 +6339,7 @@ function autoGenerateGoals(){
 // depois de toda sincronização com a nuvem — se um aparelho diferente (ainda com dados
 // antigos) trouxer duplicatas de volta numa mesclagem, elas são limpas de novo na hora.
 function dedupeAutoGoalsAndReverseXP(){
+  if(!state._dedupedGoalIds) state._dedupedGoalIds = {};
   // Sinal 1: metas com o mesmo id repetido dentro do PRÓPRIO array de metas — acontece se
   // esta limpeza rodar direto sobre o estado local bruto, ANTES de qualquer mesclagem com
   // a nuvem.
@@ -6362,8 +6363,16 @@ function dedupeAutoGoalsAndReverseXP(){
     badgeGoalIdCounts[goalId] > 1 && (goalId.startsWith('auto_cat_') || goalId.startsWith('auto_habit_daily_'))
   );
 
-  const duplicateIds = new Set([...dupFromGoals, ...dupFromBadges]);
-  if(duplicateIds.size === 0) return false; // nada duplicado agora — nada a fazer
+  // CORRIGIDO — bug sério descoberto em uso real: com dois aparelhos sincronizando, um
+  // troféu "removido" aqui podia REAPARECER numa mesclagem seguinte (vindo de um aparelho
+  // que ainda não tinha recebido a limpeza) — e cada reaparição descontava o XP de NOVO,
+  // fazendo o nível cair aos poucos a cada sincronização, sem nunca se estabilizar. Agora
+  // cada goalId só é processado (removido + XP descontado) UMA VEZ PRA SEMPRE — guardado
+  // permanentemente em state._dedupedGoalIds. Se o mesmo goalId reaparecer depois (eco de
+  // um aparelho atrasado), ele é ignorado por completo: nem remove, nem desconta de novo.
+  const duplicateIds = new Set([...dupFromGoals, ...dupFromBadges].filter(id => !state._dedupedGoalIds[id]));
+  if(duplicateIds.size === 0) return false; // nada duplicado NOVO agora — nada a fazer
+  duplicateIds.forEach(id => { state._dedupedGoalIds[id] = true; });
 
   // Percorre do mais ANTIGO pro mais NOVO (unshift bota as novas na frente, então o mais
   // antigo está no fim do array) — mantém só a primeira (mais antiga) cópia de cada id
