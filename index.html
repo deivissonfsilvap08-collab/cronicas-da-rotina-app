@@ -4476,8 +4476,18 @@ function deleteQuest(id){
   renderQuests(); renderProjects();
   persistNow();
 }
-function duplicateQuest(id){
-  const original = state.quests.find(x=>x.id===id);
+function duplicateQuest(id, fallbackData){
+  let original = state.quests.find(x=>x.id===id);
+  // Se a missão original já foi apagada (pode acontecer com missões concluídas há tempo),
+  // reconstrói uma versão razoável a partir do próprio registro do histórico de conclusão
+  // — em vez de simplesmente falhar em silêncio.
+  if(!original && fallbackData){
+    original = {
+      title: fallbackData.title, desc: fallbackData.desc, type: fallbackData.type,
+      category: fallbackData.category, secondaryCategories: fallbackData.secondaryCategories || [],
+      difficulty: fallbackData.difficulty, recurring: false
+    };
+  }
   if(!original) return;
   const copy = Object.assign({}, original, {
     id: genId(),
@@ -4488,6 +4498,19 @@ function duplicateQuest(id){
   });
   delete copy.completedAt;
   copy.attrs = (original.attrs||[]).slice();
+  // Duplicar um HÁBITO (diário recorrente) como outro hábito recorrente criaria um segundo
+  // "clone" que também reseta sozinho todo dia — dois cartões praticamente iguais brigando
+  // pela mesma rotina, pra sempre. Isso não é o que se quer ao duplicar (o objetivo é só
+  // repetir a AÇÃO agora, tipo "mais um copo d'água", não criar um hábito paralelo). Por
+  // isso a cópia de um hábito sempre vira uma missão secundária avulsa (sem recorrência) —
+  // o hábito original continua resetando normal, sozinho, todo dia, sem interferência.
+  if(copy.type === 'habit'){
+    copy.type = 'side';
+    copy.recurring = false;
+  }
+  // XP recalculado do zero pro tipo/dificuldade final da cópia — importante quando o tipo
+  // muda (hábito → secundária, valores de XP-base diferentes).
+  if(!copy.xp || copy.type !== original.type) copy.xp = (TYPE_BASE_XP[copy.type]||30)+(DIFF_XP[copy.difficulty]||0);
   state.quests.unshift(copy);
   renderQuests(); renderProjects();
   showNotif({icon:'🧬', title:'Missão duplicada', sub:copy.title+' está pronta para ser feita novamente'});
@@ -4693,6 +4716,9 @@ function renderCompletionEntry(entry){
         <span class="qtag">🗓️ ${dataFormatada}</span>
         ${entry.deadlineMet?`<span class="qtag" style="color:var(--green);">✅ Prazo cumprido</span>`:''}
       </div>
+    </div>
+    <div class="qactions">
+      <button data-act="dup-completed" data-id="${entry.questId||''}" data-ts="${entry.ts}" title="Duplicar — cria uma cópia nova pra fazer de novo">🧬</button>
     </div>`;
 }
 
@@ -4707,16 +4733,25 @@ function renderQuests(){
   list.innerHTML = '';
 
   if(currentFilter==='done'){
-    const log = state.completionLog.slice().sort((a,b)=>b.ts-a.ts);
+    let log = state.completionLog.slice().sort((a,b)=>b.ts-a.ts);
+    if(currentQuestSearch.trim()){
+      const term = normalizeText(currentQuestSearch);
+      log = log.filter(entry=>normalizeText((entry.title||'')+' '+(entry.desc||'')).includes(term));
+    }
  list.insertAdjacentHTML('beforeend', `<p style="color:var(--gold); font-weight:bold; margin-bottom:2px;">✅ Total de missões concluídas (histórico detalhado): ${log.length}</p>`);
 list.insertAdjacentHTML('beforeend', `<p style="color:var(--muted); font-size:.78em; margin-top:0; margin-bottom:10px;">📌 O contador oficial da Ficha do Herói mostra ${state.counters.totalCompleted} no total — a diferença de ${Math.max(0,state.counters.totalCompleted-log.length)} refere-se a conclusões feitas antes deste histórico detalhado existir. (Válido somente para mim, alguém que começar do zero 0 vai ter tudo certinho, o acompanhamento correto)</p>`);
-    if(log.length===0){ list.insertAdjacentHTML('beforeend','<p style="color:var(--muted)">Nenhuma missão concluída ainda.</p>'); }
+    if(log.length===0){ list.insertAdjacentHTML('beforeend', currentQuestSearch.trim() ? '<p style="color:var(--muted)">Nenhuma missão concluída encontrada pra essa busca.</p>' : '<p style="color:var(--muted)">Nenhuma missão concluída ainda.</p>'); }
     log.forEach(entry=>{
       const div = document.createElement('div');
       div.className = 'quest type-'+entry.type+' done';
       div.innerHTML = renderCompletionEntry(entry);
       list.appendChild(div);
     });
+    list.querySelectorAll('[data-act="dup-completed"]').forEach(b=>b.addEventListener('click', ()=>{
+      const ts = Number(b.dataset.ts);
+      const entry = state.completionLog.find(e=>e.ts===ts);
+      if(entry) duplicateQuest(b.dataset.id, entry);
+    }));
     return;
   }
 
