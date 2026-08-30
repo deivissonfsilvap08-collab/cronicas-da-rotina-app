@@ -5112,7 +5112,12 @@ function shortenTitle(raw){
   s = s.replace(/^(de\s+)/i,'');
   if(s.length===0) s = raw.trim();
   s = s.charAt(0).toUpperCase() + s.slice(1);
-  if(s.length>48) s = s.slice(0,45).trim()+'...';
+  // CORRIGIDO — antes cortava o título em 48 caracteres e colava "..." nele, corrompendo
+  // pra sempre o título de verdade salvo na missão (não era só um corte visual — o título
+  // curto e mutilado ERA o dado salvo). Um título grande e intencional que a pessoa digitou
+  // de propósito não deveria nunca ser encurtado sem avisar. Se algum lugar da tela precisar
+  // cortar visualmente por falta de espaço, isso é responsabilidade do CSS/exibição, não do
+  // dado guardado.
   return s;
 }
 function generateQuestsFromText(text, projectId=null){
@@ -7657,6 +7662,63 @@ rt.secondsLeft = pomoSeconds;
 if(isExplicitAction) rt.lastActionAt = Date.now();
 }
 
+// Avança quantas fases forem necessárias pra alcançar o momento presente, mesmo que várias
+// tenham se completado inteiras enquanto o app estava fora do ar (tela apagada, aba em
+// segundo plano por muito tempo). ANTES, só a PRIMEIRA fase completada era processada — se
+// você ficasse fora tempo suficiente pra completar foco E pausa (ou mais), o app só avançava
+// uma vez e tratava a fase seguinte como "começando agora", perdendo todo o tempo que já
+// tinha passado nela também. Por isso parecia que o Pomodoro "não avançava de fase pra
+// fase": ele avançava, só que sempre incompleto, ficando cada vez mais atrasado da
+// realidade. Esta função corrige isso avançando em loop até achar a fase ATUAL de verdade.
+function catchUpPomodoro(refNow){
+  if(!pomoRunning || !pomoPhaseStartedAt) return;
+  let guard = 0; // nunca deixa rodar pra sempre (ex.: relógio corrompido) — no máximo 200 fases
+  let phasesCompleted = 0;
+  while(guard++ < 200){
+    const plannedSeconds = pomoPlannedSecondsCurrent || getPlannedSecondsForPhase(pomoPhase);
+    const elapsedMs = refNow - pomoPhaseStartedAt;
+    const secondsLeft = plannedSeconds - Math.floor(elapsedMs/1000);
+    if(secondsLeft > 0){
+      pomoSeconds = secondsLeft;
+      break; // achou a fase atual de verdade — para aqui
+    }
+    // Essa fase já tinha terminado inteira enquanto você estava fora — registra ela e avança.
+    const finishedPhase = pomoPhase;
+    logPomodoroSession({
+      phase: finishedPhase,
+      startedAt: pomoPhaseStartedAt,
+      endedAt: pomoPhaseStartedAt + plannedSeconds*1000,
+      plannedSeconds, actualSeconds: plannedSeconds, completedFull: true
+    });
+    if(finishedPhase === 'work'){ state.counters.pomodoros++; updatePomodoroStreak(); }
+    advancePomoPhase();
+    phasesCompleted++;
+    if(!state.pomodoroSettings.autoAdvance){
+      // Sem avanço automático ligado, a pessoa precisa apertar Iniciar de novo pra próxima
+      // fase — não faz sentido "avançar sozinho" por várias fases nesse modo.
+      pomoRunning = false;
+      pomoPhaseStartedAt = null;
+      pomoSeconds = getPlannedSecondsForPhase(pomoPhase);
+      break;
+    }
+    // A próxima fase "começou" exatamente quando a anterior terminou — não agora.
+    pomoPhaseStartedAt = pomoPhaseStartedAt + plannedSeconds*1000;
+    pomoPlannedSecondsCurrent = getPlannedSecondsForPhase(pomoPhase);
+  }
+  updatePomoDisplay();
+  if(phasesCompleted > 0){
+    savePomoRuntime(true);
+    persistNow();
+    const title = phasesCompleted === 1 ? 'Fase concluída enquanto você estava fora' : phasesCompleted+' fases concluídas enquanto você estava fora';
+    const sub = pomoRunning ? 'Já estamos na fase atual — tudo registrado no seu histórico.' : 'O ciclo foi registrado automaticamente no seu histórico.';
+    showNotif({icon:'🔁', title, sub});
+    notifyPomoPhase(
+      pomoRunning ? (pomoPhase==='work' ? '⏳ De volta ao foco' : '☕ De volta à pausa') : '⏳ Pomodoro parado',
+      sub
+    );
+  }
+}
+
 function restorePomodoroFromState(){
   const rt = state.pomodoroRuntime;
   if(!rt) return;
@@ -7670,41 +7732,16 @@ function restorePomodoroFromState(){
 
   if(rt.running && rt.endsAt){
     const refNow = pomoNowFor(rt); // corrige o desvio de relógio se o runtime veio de outro aparelho
-    const remainingMs = rt.endsAt - refNow;
-    if(remainingMs > 0){
-      pomoSeconds = Math.ceil(remainingMs / 1000);
-      // Daqui em diante pomoPhaseStartedAt é só de uso DESTE aparelho (pra visibilitychange
-      // etc.) — por isso já fica no referencial do relógio local (Date.now() puro), nunca no
-      // referencial corrigido do outro aparelho, senão o desvio se propagaria pros próximos
-      // cálculos deste mesmo aparelho, que não precisam de correção nenhuma entre si.
-      pomoPhaseStartedAt = Date.now() - (pomoPlannedSecondsCurrent - pomoSeconds)*1000;
-      pomoRunning = true;
-      updatePomoDisplay();
+    // Daqui em diante pomoPhaseStartedAt é só de uso DESTE aparelho (pra visibilitychange
+    // etc.) — por isso já fica no referencial do relógio local (Date.now() puro), nunca no
+    // referencial corrigido do outro aparelho, senão o desvio se propagaria pros próximos
+    // cálculos deste mesmo aparelho, que não precisam de correção nenhuma entre si.
+    pomoPhaseStartedAt = Date.now() - (refNow - (rt.phaseStartedAt || refNow));
+    pomoRunning = true;
+    catchUpPomodoro(Date.now());
+    if(pomoRunning){
       pomoInterval = setInterval(tickPomodoro, 1000);
-      return;
     }
-    const plannedSecondsAtClose = rt.plannedSeconds || getPlannedSecondsForPhase(pomoPhase);
-    const startedAt = rt.phaseStartedAt || (refNow - plannedSecondsAtClose*1000);
-    logPomodoroSession({
-      phase: pomoPhase, startedAt, endedAt: startedAt + plannedSecondsAtClose*1000,
-      plannedSeconds: plannedSecondsAtClose, actualSeconds: plannedSecondsAtClose, completedFull: true
-    });
-    if(pomoPhase === 'work'){ state.counters.pomodoros++; updatePomodoroStreak(); }
-    advancePomoPhase();
-
-    if(state.pomodoroSettings.autoAdvance){
-      pomoRunning = true;
-      pomoPhaseStartedAt = Date.now();
-      pomoInterval = setInterval(tickPomodoro, 1000);
-      showNotif({icon:'🔁', title:'Fase concluída enquanto você estava fora', sub:'Avançando automaticamente para a próxima fase.'});
-    } else {
-      pomoRunning = false;
-      pomoPhaseStartedAt = null;
-      showNotif({icon:'⏳', title:'Sessão concluída enquanto você estava fora', sub:'O ciclo anterior foi registrado automaticamente no seu histórico.'});
-    }
-    updatePomoDisplay();
-    savePomoRuntime(true);
-    persistNow();
     return;
   }
 
@@ -7715,28 +7752,9 @@ function restorePomodoroFromState(){
 }
 
 document.addEventListener('visibilitychange', ()=>{
-if(document.visibilityState === 'visible' && pomoRunning && pomoPhaseStartedAt){
-const plannedSeconds = pomoPlannedSecondsCurrent || getPlannedSecondsForPhase(pomoPhase);
-const elapsedMs = Date.now() - pomoPhaseStartedAt;
-
-const realSecondsLeft = plannedSeconds - Math.floor(elapsedMs/1000);
-
-if(realSecondsLeft <= 0){
-
-pomoSeconds = 0;
-
-tickPomodoro();
-
-} else {
-
-pomoSeconds = realSecondsLeft;
-
-updatePomoDisplay();
-
-}
-
-}
-
+  if(document.visibilityState === 'visible' && pomoRunning && pomoPhaseStartedAt){
+    catchUpPomodoro(Date.now());
+  }
 });
 
 
