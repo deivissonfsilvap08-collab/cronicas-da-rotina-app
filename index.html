@@ -888,7 +888,7 @@ prazo: 25/08/2026</div>
         <label class="pomo-check"><input type="checkbox" id="pomo-reset-default"> ↺ Sempre voltar ao padrão (25/5/15) ao recarregar</label>
       </div>
       <div class="pomo-settings-row">
-        <label class="pomo-check"><input type="checkbox" id="pomo-notifications"> 🔔 Notificar quando o ciclo terminar (mesmo com o app minimizado)</label>
+        <label class="pomo-check"><input type="checkbox" id="pomo-notifications"> 🔔 Notificar quando o ciclo terminar (funciona mesmo com o app fechado, se você estiver logado na nuvem)</label>
       </div>
       <small class="hint" id="pomo-notifications-hint" style="display:none;"></small>
 </div>
@@ -2523,6 +2523,22 @@ function scheduleSave(){
 
 const SUPABASE_URL = 'https://jdfovnjpeeoltybhytyo.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_6KRDxg4lRmjckoAul9BDPQ__pjXq4Qw';
+
+// Chave PÚBLICA do Web Push (VAPID) — é seguro ela estar aqui no código visível, é a
+// metade "pública" mesmo, igual uma chave pública de criptografia. A metade PRIVADA nunca
+// aparece em lugar nenhum do navegador — ela fica só como segredo na Edge Function.
+const VAPID_PUBLIC_KEY = 'BCjdVYo8RqdBoSk49TEmP5Qr2hzUI2fVSrkqiS89ZPhWfF1az4bzqH7UwtHyfyiIg1Wg81GbhdqmafEVMCWktIE';
+
+// A API de Push exige a chave nesse formato específico (Uint8Array), não como texto puro —
+// essa função só faz essa conversão.
+function urlBase64ToUint8Array(base64String){
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for(let i=0;i<rawData.length;i++) outputArray[i] = rawData.charCodeAt(i);
+  return outputArray;
+}
 const CLOUD_PUSH_DEBOUNCE_MS = 1200;
 
 let sb = null;
@@ -3047,6 +3063,12 @@ async function afterCloudLogin(session){
   document.getElementById('cloud-login-again-btn').style.display = 'none';
   await pullCloudStateAndMerge(); // já nunca lança erro (ver comentário lá dentro)
   safeInit(subscribeCloudRealtime, 'assinatura em tempo real da nuvem');
+  // Se a pessoa já tinha ativado as notificações do Pomodoro antes de logar (ou tá
+  // logando de novo depois de sair), garante que este aparelho fica inscrito no push —
+  // sem isso, o "aviso mesmo com o app fechado" nunca começaria a funcionar sozinho.
+  if(state.pomodoroSettings.notificationsEnabled){
+    safeInit(()=>{ ensurePushSubscription().then(()=>{ if(pomoRunning) syncPushSchedule().catch(()=>{}); }); }, 'inscrição de push (após login)');
+  }
 }
 
 function resetCloudUiToLoggedOut(){
@@ -7447,6 +7469,15 @@ pomoNotifCheckbox.addEventListener('change', async (e)=>{
   state.pomodoroSettings.notificationsEnabled = e.target.checked;
   persistNow();
   updatePomoNotificationsHint();
+  if(e.target.checked){
+    // Inscreve este aparelho pro Web Push (exige estar logado na nuvem — sem isso, o
+    // servidor não tem como saber pra quem mandar o aviso quando você estiver longe).
+    const inscrito = await ensurePushSubscription();
+    if(!inscrito && (!sb || !cloudUserId)){
+      showNotif({icon:'☁', title:'Falta um passo', sub:'Pra receber aviso mesmo com o app fechado, entre na nuvem em Configurações — sem isso, só funciona com alguma aba aberta.'});
+    }
+    if(pomoRunning) syncPushSchedule().catch(()=>{});
+  }
 });
 
 // Dispara uma notificação de VERDADE do sistema operacional (não o pop-up interno do
@@ -7467,6 +7498,76 @@ function notifyPomoPhase(title, body){
       new Notification(title, payload);
     }
   }catch(err){ console.error('Falha ao mostrar notificação do Pomodoro', err); }
+}
+
+/* ============ Web Push do Pomodoro — notificação de verdade, mesmo com o app fechado
+   ou o celular com a tela apagada ============
+   Diferente de notifyPomoPhase() acima (que só funciona enquanto alguma aba deste app
+   ainda está executando código, mesmo que em segundo plano), este mecanismo entrega o
+   aviso através do servidor — funciona mesmo com TUDO fechado. Duas peças:
+   1) ensurePushSubscription(): inscreve ESTE aparelho pra receber avisos (uma vez).
+   2) syncPushSchedule(): toda vez que o Pomodoro muda de estado, avisa o servidor "manda
+      um aviso daqui a X minutos dizendo Y" — ou cancela o aviso pendente, se pausou/parou.
+   Como o aviso precisa saber PRA QUEM mandar, isso exige estar logado na nuvem — sem
+   conta, não tem como o servidor saber qual aparelho é seu. */
+
+async function ensurePushSubscription(){
+  if(!('serviceWorker' in navigator) || !('PushManager' in window)) return false;
+  if(!sb || !cloudUserId){
+    console.warn('Push exige estar logado na nuvem (precisa saber pra quem mandar o aviso).');
+    return false;
+  }
+  try{
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if(!sub){
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true, // exigência do navegador: toda push tem que gerar uma notificação visível
+        applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
+      });
+    }
+    const json = sub.toJSON();
+    await withCloudTimeout(sb.from('push_subscriptions').upsert({
+      user_id: cloudUserId,
+      endpoint: json.endpoint,
+      p256dh: json.keys.p256dh,
+      auth_key: json.keys.auth,
+      device_label: navigator.userAgent.slice(0,120)
+    }, { onConflict: 'user_id,endpoint' }));
+    return true;
+  }catch(err){
+    console.error('Falha ao inscrever este aparelho pra notificações por push', err);
+    return false;
+  }
+}
+
+// Toda vez que o Pomodoro muda de estado de verdade (iniciar/pausar/pular/reiniciar,
+// transição de fase), sincroniza com o servidor: se está rodando, agenda o próximo aviso
+// pra hora exata que a fase atual termina; se não está rodando, cancela qualquer aviso
+// pendente — pra nunca chegar um aviso atrasado e errado de uma sessão que você já parou.
+async function syncPushSchedule(){
+  if(!sb || !cloudUserId) return; // sem login não tem como saber pra quem mandar
+  if(!state.pomodoroSettings.notificationsEnabled) return;
+  try{
+    // Sempre limpa o agendamento anterior primeiro — nunca deixa mais de um pendente.
+    await withCloudTimeout(sb.from('scheduled_notifications').delete().eq('user_id', cloudUserId).eq('tag','pomo-phase').eq('sent', false));
+    if(!pomoRunning || !pomoPhaseStartedAt) return; // pausado/parado — só cancela mesmo, não agenda nada novo
+
+    const plannedSeconds = pomoPlannedSecondsCurrent || getPlannedSecondsForPhase(pomoPhase);
+    const fireAt = new Date(pomoPhaseStartedAt + plannedSeconds*1000).toISOString();
+    const nextPhase = pomoPhase === 'work' ? (pomoCycleCount>=4 ? 'longbreak' : 'break') : 'work';
+    // Aviso mais assertivo de propósito, não um toast passivo — a ideia é REALMENTE
+    // interromper quem está em hiperfoco, não só informar depois que já passou.
+    const title = nextPhase === 'work'
+      ? '⏳ VOLTA AO FOCO — a pausa acabou'
+      : (nextPhase === 'longbreak' ? '🌿 PARE AGORA — pausa longa (15 min)' : '☕ PARE AGORA — hora da pausa');
+    const body = nextPhase === 'work'
+      ? 'Sua pausa terminou. Hora de voltar ao foco.'
+      : 'Levanta, bebe água, mexe as pernas. O foco espera.';
+    await withCloudTimeout(sb.from('scheduled_notifications').insert({
+      user_id: cloudUserId, fire_at: fireAt, title, body, tag: 'pomo-phase', require_interaction: true
+    }));
+  }catch(err){ console.error('Falha ao sincronizar aviso agendado do Pomodoro', err); }
 }
 
 function formatTime(s){ const m=Math.floor(s/60), sec=s%60; return String(m).padStart(2,'0')+':'+String(sec).padStart(2,'0'); }
@@ -7660,6 +7761,7 @@ rt.secondsLeft = pomoSeconds;
 // não o "estou rodando?", que decide quem manda no cronômetro na mesclagem (ver
 // mergePomodoroRuntime). A ação mais recente sempre vence, não importa qual aparelho.
 if(isExplicitAction) rt.lastActionAt = Date.now();
+if(isExplicitAction) syncPushSchedule().catch(err=>console.error('Falha ao sincronizar push do Pomodoro', err));
 }
 
 // Avança quantas fases forem necessárias pra alcançar o momento presente, mesmo que várias

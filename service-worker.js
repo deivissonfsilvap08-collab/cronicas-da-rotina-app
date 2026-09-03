@@ -13,7 +13,7 @@
 // troque o número aqui embaixo (v3 -> v4 -> v5...). Isso avisa o navegador de todo mundo
 // "isto aqui é uma versão nova de verdade, jogue fora o que você tinha guardado" — foi a
 // falta disso que fez uma versão quebrada antiga ficar grudada nos navegadores antes.
-const CACHE_NAME = 'cronicas-da-rotina-v4';
+const CACHE_NAME = 'cronicas-da-rotina-v5';
 
 const APP_SHELL = [
   './index.html',
@@ -72,6 +72,37 @@ self.addEventListener('notificationclick', (event) => {
       if (self.clients.openWindow) return self.clients.openWindow('./index.html');
     })
   );
+});
+
+// ===== Web Push de verdade =====
+// Isto aqui é o que faz a notificação do Pomodoro chegar MESMO com a aba fechada, o
+// navegador minimizado, ou o celular com a tela apagada — porque quem decide "está na
+// hora" não é este código rodando sem parar (nada roda sem parar aqui), é o servidor do
+// Supabase que acorda o navegador especificamente pra isto, através do sistema
+// operacional. O 'push' é um evento que só existe pra isso: entregar uma mensagem mesmo
+// com o site "desligado" do ponto de vista do usuário.
+self.addEventListener('push', (event) => {
+  let data = {};
+  try{
+    data = event.data ? event.data.json() : {};
+  }catch(e){
+    data = { title: 'Crônicas da Rotina', body: event.data ? event.data.text() : '' };
+  }
+  const title = data.title || 'Crônicas da Rotina';
+  const options = {
+    body: data.body || '',
+    icon: './icon-192.png',
+    badge: './icon-192.png',
+    tag: data.tag || 'pomo-phase',
+    renotify: true, // se já tinha uma notificação igual (mesma tag) na tela, troca por esta
+                     // — nunca empilha várias notificações antigas de ciclos que já passaram
+    requireInteraction: !!data.requireInteraction, // fica na tela até a pessoa interagir,
+                                                     // em vez de sumir sozinha em poucos
+                                                     // segundos — pro aviso de pausa/foco
+                                                     // realmente ser notado, não ignorado
+    vibrate: [200, 100, 200]
+  };
+  event.waitUntil(self.registration.showNotification(title, options));
 });
 
 self.addEventListener('fetch', (event) => {
