@@ -3062,6 +3062,12 @@ async function afterCloudLogin(session){
   cloudUserId = session.user.id;
   cloudUserEmail = session.user.email;
   cloudAccessToken = session.access_token;
+  // Calibra o desvio de relógio com o servidor JÁ AQUI, assim que loga — antes mesmo de
+  // mexer no Pomodoro. Sem isso, só a PRIMEIRA notificação da sessão nasceria sem essa
+  // correção (serverClockSkewMs só deixa de ser 0 depois da resposta de alguma chamada).
+  // Chamada leve e silenciosa (sem esperar o resultado) — só serve pra ler o cabeçalho
+  // "Date" da resposta e já deixar a estimativa pronta antes de você precisar dela.
+  safeInit(()=>{ supabaseKeepaliveRequest('scheduled_notifications?select=id&limit=1', 'GET').catch(()=>{}); }, 'calibração do relógio do servidor');
   hideCloudLoginOverlay();
   setCloudAccountStatus('Conectado como ' + cloudUserEmail + '.');
   document.getElementById('cloud-sync-now-btn').style.display = 'inline-block';
