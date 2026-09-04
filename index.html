@@ -2543,6 +2543,11 @@ const CLOUD_PUSH_DEBOUNCE_MS = 1200;
 
 let sb = null;
 let cloudUserId = null;
+// Token de sessão (JWT) — guardado à parte pra poder montar chamadas de rede "cruas" (sem
+// passar pelo supabase-js) quando precisamos de uma garantia mais forte de que o pedido
+// termina mesmo que a aba feche logo em seguida (ver scheduleNotificationKeepalive). Fica
+// sempre atualizado automaticamente via onAuthStateChange, então nunca fica velho demais.
+let cloudAccessToken = null;
 let cloudUserEmail = null;
 let cloudPushTimer = null;
 let cloudChannel = null;
@@ -3056,6 +3061,7 @@ function subscribeCloudRealtime(){
 async function afterCloudLogin(session){
   cloudUserId = session.user.id;
   cloudUserEmail = session.user.email;
+  cloudAccessToken = session.access_token;
   hideCloudLoginOverlay();
   setCloudAccountStatus('Conectado como ' + cloudUserEmail + '.');
   document.getElementById('cloud-sync-now-btn').style.display = 'inline-block';
@@ -3089,6 +3095,15 @@ async function initCloudSync(){
     return;
   }
   sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+  // Mantém cloudAccessToken sempre em dia sozinho — o Supabase renova o token por baixo
+  // dos panos periodicamente, e essa é a forma de saber toda vez que isso acontece, sem
+  // precisar ficar pedindo de novo manualmente.
+  safeInit(()=>{
+    sb.auth.onAuthStateChange((_event, session)=>{
+      cloudAccessToken = session ? session.access_token : null;
+    });
+  }, 'observador de sessão da nuvem');
 
   document.getElementById('cloud-login-submit').addEventListener('click', doCloudLoginSubmit);
   document.getElementById('cloud-login-password').addEventListener('keydown', (e)=>{ if(e.key==='Enter') doCloudLoginSubmit(); });
@@ -7545,13 +7560,44 @@ async function ensurePushSubscription(){
 // transição de fase), sincroniza com o servidor: se está rodando, agenda o próximo aviso
 // pra hora exata que a fase atual termina; se não está rodando, cancela qualquer aviso
 // pendente — pra nunca chegar um aviso atrasado e errado de uma sessão que você já parou.
+// Faz uma chamada de rede "crua" (sem passar pelo cliente do supabase-js) marcada como
+// keepalive:true — esse é um recurso do próprio navegador que garante que o pedido
+// TERMINA de chegar ao servidor mesmo que a aba feche um instante depois de disparado.
+// É isso que elimina a necessidade de "esperar uns segundos antes de fechar": sem
+// keepalive, o navegador se sente livre pra cortar a conexão no meio se a página começar
+// a fechar; com keepalive, ele entrega o pedido de qualquer jeito, em segundo plano.
+async function supabaseKeepaliveRequest(path, method, body){
+  if(!cloudUserId || !cloudAccessToken) throw new Error('Sem sessão ativa pra essa chamada.');
+  const res = await fetch(SUPABASE_URL + '/rest/v1/' + path, {
+    method,
+    keepalive: true,
+    headers: {
+      'Content-Type': 'application/json',
+      'apikey': SUPABASE_KEY,
+      'Authorization': 'Bearer ' + cloudAccessToken,
+      'Prefer': method === 'POST' ? 'resolution=merge-duplicates,return=minimal' : 'return=minimal'
+    },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  if(!res.ok && res.status !== 404){
+    const text = await res.text().catch(()=> '');
+    throw new Error('Falha na chamada keepalive ('+res.status+'): ' + text);
+  }
+  return res;
+}
+
 async function syncPushSchedule(){
-  if(!sb || !cloudUserId) return; // sem login não tem como saber pra quem mandar
+  if(!sb || !cloudUserId || !cloudAccessToken) return; // sem login não tem como saber pra quem mandar
   if(!state.pomodoroSettings.notificationsEnabled) return;
   try{
-    // Sempre limpa o agendamento anterior primeiro — nunca deixa mais de um pendente.
-    await withCloudTimeout(sb.from('scheduled_notifications').delete().eq('user_id', cloudUserId).eq('tag','pomo-phase').eq('sent', false));
-    if(!pomoRunning || !pomoPhaseStartedAt) return; // pausado/parado — só cancela mesmo, não agenda nada novo
+    if(!pomoRunning || !pomoPhaseStartedAt){
+      // Pausado/parado: só cancela o que estiver pendente. Uma chamada só, com keepalive.
+      await supabaseKeepaliveRequest(
+        'scheduled_notifications?user_id=eq.'+encodeURIComponent(cloudUserId)+'&tag=eq.pomo-phase&sent=eq.false',
+        'DELETE'
+      );
+      return;
+    }
 
     const plannedSeconds = pomoPlannedSecondsCurrent || getPlannedSecondsForPhase(pomoPhase);
     const fireAt = new Date(pomoPhaseStartedAt + plannedSeconds*1000).toISOString();
@@ -7564,9 +7610,15 @@ async function syncPushSchedule(){
     const body = nextPhase === 'work'
       ? 'Sua pausa terminou. Hora de voltar ao foco.'
       : 'Levanta, bebe água, mexe as pernas. O foco espera.';
-    await withCloudTimeout(sb.from('scheduled_notifications').insert({
-      user_id: cloudUserId, fire_at: fireAt, title, body, tag: 'pomo-phase', require_interaction: true
-    }));
+    // UMA chamada só (upsert), no lugar de "apagar depois criar" — o índice único parcial
+    // (user_id, tag) where sent=false garante que isso SUBSTITUI a pendente atual, em vez
+    // de criar uma segunda linha. Metade das viagens ao servidor, e a única que resta é
+    // keepalive — nunca mais depende de esperar antes de fechar a aba.
+    await supabaseKeepaliveRequest(
+      'scheduled_notifications?on_conflict=user_id,tag',
+      'POST',
+      { user_id: cloudUserId, fire_at: fireAt, title, body, tag: 'pomo-phase', require_interaction: true, sent: false }
+    );
   }catch(err){ console.error('Falha ao sincronizar aviso agendado do Pomodoro', err); }
 }
 
