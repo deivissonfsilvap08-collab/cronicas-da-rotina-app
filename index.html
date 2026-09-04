@@ -7566,6 +7566,30 @@ async function ensurePushSubscription(){
 // É isso que elimina a necessidade de "esperar uns segundos antes de fechar": sem
 // keepalive, o navegador se sente livre pra cortar a conexão no meio se a página começar
 // a fechar; com keepalive, ele entrega o pedido de qualquer jeito, em segundo plano.
+// Desvio estimado entre o relógio DESTE PC e o relógio real do servidor Supabase (em ms).
+// Positivo = o relógio deste PC está ADIANTADO em relação ao servidor; negativo = atrasado.
+// CORRIGE UM BUG: as notificações de Pomodoro estavam disparando ANTES da hora certa porque
+// fire_at era calculado só com Date.now() deste PC — se o relógio do sistema estiver
+// atrasado em relação à hora real (bem comum, principalmente sem sincronização automática
+// ativada no Windows), o horário salvo no banco também nasce atrasado, e o servidor (que usa
+// um relógio sempre certo, sincronizado via internet) dispara cedo demais. Estimamos esse
+// desvio de graça, sem nenhuma chamada extra: toda resposta HTTP já vem com o cabeçalho
+// "Date", que é o horário exato do servidor no momento em que respondeu.
+let serverClockSkewMs = 0;
+
+function updateServerClockSkewFromResponse(res){
+  try{
+    const dateHeader = res && res.headers && res.headers.get('Date');
+    if(!dateHeader) return;
+    const serverNow = new Date(dateHeader).getTime();
+    if(!serverNow || isNaN(serverNow)) return;
+    const measured = Date.now() - serverNow; // positivo = este PC adiantado em relação ao servidor
+    // Suaviza a estimativa (média móvel) em vez de confiar 100% numa única medição — assim
+    // uma resposta pontualmente lenta na rede não distorce o desvio de uma vez só.
+    serverClockSkewMs = serverClockSkewMs ? Math.round(serverClockSkewMs*0.7 + measured*0.3) : measured;
+  }catch(e){ /* Date header ausente ou inválido — mantém a última estimativa conhecida */ }
+}
+
 async function supabaseKeepaliveRequest(path, method, body){
   if(!cloudUserId || !cloudAccessToken) throw new Error('Sem sessão ativa pra essa chamada.');
   const res = await fetch(SUPABASE_URL + '/rest/v1/' + path, {
@@ -7579,6 +7603,7 @@ async function supabaseKeepaliveRequest(path, method, body){
     },
     body: body ? JSON.stringify(body) : undefined
   });
+  updateServerClockSkewFromResponse(res);
   if(!res.ok && res.status !== 404){
     const text = await res.text().catch(()=> '');
     throw new Error('Falha na chamada keepalive ('+res.status+'): ' + text);
@@ -7600,7 +7625,11 @@ async function syncPushSchedule(){
     }
 
     const plannedSeconds = pomoPlannedSecondsCurrent || getPlannedSecondsForPhase(pomoPhase);
-    const fireAt = new Date(pomoPhaseStartedAt + plannedSeconds*1000).toISOString();
+    // CORRIGIDO — subtrai o desvio estimado entre este PC e o relógio real do servidor.
+    // Sem isso, se o relógio do PC estiver atrasado, fire_at nascia atrasado também, e o
+    // servidor (com relógio sempre certo) disparava o aviso antes da fase realmente acabar
+    // na tela deste aparelho. Ver serverClockSkewMs, acima.
+    const fireAt = new Date(pomoPhaseStartedAt - serverClockSkewMs + plannedSeconds*1000).toISOString();
     const nextPhase = pomoPhase === 'work' ? (pomoCycleCount>=4 ? 'longbreak' : 'break') : 'work';
     // Aviso mais assertivo de propósito, não um toast passivo — a ideia é REALMENTE
     // interromper quem está em hiperfoco, não só informar depois que já passou.
