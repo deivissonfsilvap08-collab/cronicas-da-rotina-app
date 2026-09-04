@@ -7769,16 +7769,24 @@ updatePomoDisplay();
 
 pomoPhaseStartedAt = Date.now();
 
+// CORRIGIDO — bug que cancelava o aviso da próxima fase: savePomoRuntime(true) dispara
+// syncPushSchedule(), que decide "agendar aviso novo" ou "cancelar tudo" checando
+// pomoRunning. Antes, esse pomoRunning=true só era setado DEPOIS de savePomoRuntime rodar
+// (só dentro do bloco autoAdvance, mais abaixo) — então syncPushSchedule sempre via
+// pomoRunning ainda false nesse instante e CANCELAVA o agendamento em vez de criar o da
+// nova fase. Por isso a notificação sumia da tabela sem nunca disparar. Agora, quando o
+// avanço automático está ativo, marcamos pomoRunning=true ANTES de savePomoRuntime — igual
+// já era feito no botão "Iniciar" — pra o sync ver o estado certo e agendar corretamente.
+if(state.pomodoroSettings.autoAdvance){
+  pomoRunning = true;
+}
+
 savePomoRuntime(true);
 
 persistNow();
 
 if(state.pomodoroSettings.autoAdvance){
-
-pomoRunning = true;
-
-pomoInterval = setInterval(tickPomodoro, 1000);
-
+  pomoInterval = setInterval(tickPomodoro, 1000);
 }
 
 }
